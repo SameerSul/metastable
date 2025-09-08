@@ -27,6 +27,5 @@ RUN umask 022 && \
     tar zxf - -C /usr/local --strip-components=1 && \
     chmod 755 /usr/local/bin
 
-# Install openlane
-ENV OPENLANE_IMAGE_OVERRIDE=ghcr.io/tinytapeout/openlane2:ihp-v3.0.0.dev17
-RUN pip install https://github.com/TinyTapeout/openlane2/releases/download/ihp-v3.0.0.dev17/openlane-3.0.0.dev17-py3-none-any.whl
+# Install LibreLane
+RUN pip3 install librelane==3.0.0.dev44
