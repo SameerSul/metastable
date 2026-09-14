@@ -1,42 +1,59 @@
 ![](../../workflows/gds/badge.svg) ![](../../workflows/docs/badge.svg) ![](../../workflows/test/badge.svg) ![](../../workflows/fpga/badge.svg)
 
-# Tiny Tapeout Verilog Project Template
+# Metastable: programmable protocol emulator
 
-- [Read the documentation for project](docs/info.md)
+A general-purpose protocol emulator ASIC for the Jane Street protocol emulator
+competition, built on [Tiny Tapeout](https://tinytapeout.com) (IHP 130nm CMOS5L,
+8x4 tiles). Two RP2040-PIO-inspired programmable state machines bit-bang
+arbitrary serial protocols — UART, SPI, I2C, and anything else that fits the
+timing — entirely in firmware loaded over SPI after fabrication.
 
-## What is Tiny Tapeout?
+Full datasheet: [docs/info.md](docs/info.md)
 
-Tiny Tapeout is an educational project that aims to make it easier and cheaper than ever to get your digital and analog designs manufactured on a real chip.
+## Architecture
 
-To learn more and get started, visit https://tinytapeout.com.
+- 2 state machines, one 16-bit instruction per divided-clock tick, shared
+  32-entry instruction memory
+- Per SM: fractional 16.8 clock divider, 8-bit OSR/ISR with configurable shift
+  direction + autopull/autopush, X/Y scratch registers, 4-deep TX/RX FIFOs
+- Every instruction carries a 5-bit delay/side-set field → cycle-exact pin timing
+- 16-entry GPIO space: 8 bidirectional (`uio`), 5 input-only (`ui[7:3]`),
+  3 output-only (`uo[4:2]`); per-pin priority router, pins hold last driven value
+- 4 shared IRQ flags for inter-SM sync and host interrupts (maskable `HOST_IRQ` pin)
+- Host interface: mode-0 SPI slave (clk >= 8x SCK), command byte
+  `{RW, ADDR[6:0]}`, auto-incrementing address, FIFO registers held
 
-## Set up your Verilog project
+## ISA
 
-1. Add your Verilog files to the `src` folder.
-2. Edit the [info.yaml](info.yaml) and update information about your project, paying special attention to the `source_files` and `top_module` properties. If you are upgrading an existing Tiny Tapeout project, check out our [online info.yaml migration tool](https://tinytapeout.github.io/tt-yaml-upgrade-tool/).
-3. Edit [docs/info.md](docs/info.md) and add a description of your project.
-4. Adapt the testbench to your design. See [test/README.md](test/README.md) for more information.
+Instruction format: `[15:13] opcode | [12:8] delay/side-set | [7:0] operands`
 
-The GitHub action will automatically build the ASIC files using [LibreLane](https://www.zerotoasiccourse.com/terminology/librelane/).
+| Opcode | Instruction | Function |
+|--------|-------------|----------|
+| 000 | `JMP cond, addr` | always, !X, X--, !Y, Y--, X!=Y, PIN, !OSRE |
+| 001 | `WAIT pol, src, idx` | stall on GPIO / relative pin / IRQ flag |
+| 010 | `IN src, n` | shift 1-8 bits into ISR |
+| 011 | `OUT dst, n` | shift 1-8 bits out of OSR |
+| 100 | `PUSH` / `PULL` | ISR -> RX FIFO / TX FIFO -> OSR |
+| 101 | `MOV dst, op(src)` | copy / invert / bit-reverse; `MOV EXEC` injects instructions |
+| 110 | `IRQ set/clr/wait idx` | 4 shared flags |
+| 111 | `SET dst, imm` | drive pins/pindirs, load X/Y |
 
-## Enable GitHub actions to build the results page
+A Python assembler for the ISA lives in
+[test/metastable.py](test/metastable.py), along with an SPI host driver.
 
-- [Enabling GitHub Pages](https://tinytapeout.com/faq/#my-github-action-is-failing-on-the-pages-part)
+## Testing
+
+```sh
+cd test && make
+```
+
+Runs the cocotb suite ([test/test.py](test/test.py)): SPI register/instruction
+memory read-write, and a full-duplex UART loopback — SM0 transmits 8N1 frames
+on GPIO0, SM1 receives them on the same pin through the pin router, bytes go
+in via SM0's TX FIFO and come back out of SM1's RX FIFO over SPI.
 
 ## Resources
 
-- [FAQ](https://tinytapeout.com/faq/)
-- [Digital design lessons](https://tinytapeout.com/digital_design/)
-- [Learn how semiconductors work](https://tinytapeout.com/siliwiz/)
-- [Join the community](https://tinytapeout.com/discord)
+- [Tiny Tapeout FAQ](https://tinytapeout.com/faq/)
 - [Build your design locally](https://www.tinytapeout.com/guides/local-hardening/)
-
-## What next?
-
-- [Submit your design to the next shuttle](https://app.tinytapeout.com/).
-- Edit [this README](README.md) and explain your design, how it works, and how to test it.
-- Share your project on your social network of choice:
-  - LinkedIn [#tinytapeout](https://www.linkedin.com/search/results/content/?keywords=%23tinytapeout) [@TinyTapeout](https://www.linkedin.com/company/100708654/)
-  - Mastodon [#tinytapeout](https://chaos.social/tags/tinytapeout) [@matthewvenn](https://chaos.social/@matthewvenn)
-  - X (formerly Twitter) [#tinytapeout](https://twitter.com/hashtag/tinytapeout) [@tinytapeout](https://twitter.com/tinytapeout)
-  - Bluesky [@tinytapeout.com](https://bsky.app/profile/tinytapeout.com)
+- [RP2040 datasheet, ch. 3 (PIO)](https://datasheets.raspberrypi.com/rp2040/rp2040-datasheet.pdf) — the inspiration
