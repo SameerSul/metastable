@@ -4,7 +4,7 @@
 
 A general-purpose protocol emulator ASIC for the Jane Street protocol emulator
 competition, built on [Tiny Tapeout](https://tinytapeout.com) (IHP 130nm CMOS5L,
-8x4 tiles). Two RP2040-PIO-inspired programmable state machines bit-bang
+6x4 tiles). Two RP2040-PIO-inspired programmable state machines bit-bang
 arbitrary serial protocols — UART, SPI, I2C, and anything else that fits the
 timing — entirely in firmware loaded over SPI after fabrication.
 
