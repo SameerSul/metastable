@@ -18,7 +18,8 @@
  *   0x44 GPIO_IN_L        pins 7:0
  *   0x45 GPIO_IN_H        pins 15:8
  *   0x46 PC0  0x47 PC1    current program counters (debug)
- *   0x50-0x5D SM0, 0x60-0x6D SM1:
+ *   0x48 FLEVEL0  0x49 FLEVEL1   [3:0] TX fill level [7:4] RX fill level
+ *   0x50-0x5E SM0, 0x60-0x6E SM1:
  *     +0 CLKDIV_INT_L  +1 CLKDIV_INT_H  +2 CLKDIV_FRAC
  *     +3 WRAP_TOP      +4 WRAP_BOTTOM
  *     +5 SHIFTCTRL     [0] autopull [1] autopush [2] out_right [3] in_right
@@ -29,6 +30,8 @@
  *     +A PIN_SIDE      [3:0] base [5:4] count [6] opt [7] pindir
  *     +B JMP_PIN       [3:0] pin
  *     +C TXF (write)   +D RXF (read)
+ *     +E STATUS_CFG    MOV STATUS = all-ones while sel FIFO level < N:
+ *                      [3:0] N  [4] sel (0 TX, 1 RX); reset 0x01 = TX empty
  */
 
 `default_nettype none
@@ -118,6 +121,7 @@ module tt_um_sulems6_metastable (
   reg [3:0]  pin_in     [0:1];
   reg [7:0]  pin_side   [0:1];
   reg [3:0]  jmp_pin    [0:1];
+  reg [4:0]  status_cfg [0:1]; // [3:0] level N, [4] sel (0 TX, 1 RX)
 
   wire       cfg_sm1 = (spi_addr[6:4] == 3'b110);
   integer k;
@@ -139,6 +143,7 @@ module tt_um_sulems6_metastable (
         pin_in[k]    <= 4'd0;
         pin_side[k]  <= 8'd0;
         jmp_pin[k]   <= 4'd0;
+        status_cfg[k] <= 5'h01; // TX level < 1 (TX empty)
       end
     end else if (spi_wr) begin
       if (spi_addr == 7'h40) sm_en    <= spi_wdata[1:0];
@@ -157,6 +162,7 @@ module tt_um_sulems6_metastable (
           4'h9: pin_in[cfg_sm1]        <= spi_wdata[3:0];
           4'hA: pin_side[cfg_sm1]      <= spi_wdata;
           4'hB: jmp_pin[cfg_sm1]       <= spi_wdata[3:0];
+          4'hE: status_cfg[cfg_sm1]    <= spi_wdata[4:0];
           default: ;
         endcase
       end
@@ -175,6 +181,8 @@ module tt_um_sulems6_metastable (
   wire       rx_full  [0:1];
   wire [7:0] rx_wdata [0:1];
   wire       rx_push  [0:1];
+  wire [3:0] tx_level [0:1];
+  wire [3:0] rx_level [0:1];
 
   wire [1:0] txf_wr = {spi_wr && (spi_addr == 7'h6C),
                        spi_wr && (spi_addr == 7'h5C)};
@@ -188,13 +196,13 @@ module tt_um_sulems6_metastable (
           .clk(clk), .rst_n(rst_n), .flush(restart[g]),
           .push(txf_wr[g]), .wdata(spi_wdata),
           .pop(tx_pop[g]), .rdata(tx_rdata[g]),
-          .full(tx_full[g]), .empty(tx_empty[g])
+          .full(tx_full[g]), .empty(tx_empty[g]), .level(tx_level[g])
       );
       pio_fifo u_rx (
           .clk(clk), .rst_n(rst_n), .flush(restart[g]),
           .push(rx_push[g]), .wdata(rx_wdata[g]),
           .pop(rxf_rd[g]), .rdata(rx_rdata[g]),
-          .full(rx_full[g]), .empty(rx_empty[g])
+          .full(rx_full[g]), .empty(rx_empty[g]), .level(rx_level[g])
       );
     end
   endgenerate
@@ -216,6 +224,15 @@ module tt_um_sulems6_metastable (
   assign instr[0] = {imem_h[pc[0]], imem_l[pc[0]]};
   assign instr[1] = {imem_h[pc[1]], imem_l[pc[1]]};
 
+  // MOV STATUS: all-ones while the selected FIFO's level is below N
+  wire [1:0] status_sel;
+  generate
+    for (g = 0; g < 2; g = g + 1) begin : status
+      assign status_sel[g] = (status_cfg[g][4] ? rx_level[g] : tx_level[g])
+                             < status_cfg[g][3:0];
+    end
+  endgenerate
+
   generate
     for (g = 0; g < 2; g = g + 1) begin : sms
       pio_clkdiv u_div (
@@ -235,6 +252,7 @@ module tt_um_sulems6_metastable (
           .side_base(pin_side[g][3:0]), .side_count(pin_side[g][5:4]),
           .side_opt(pin_side[g][6]), .side_pindir(pin_side[g][7]),
           .jmp_pin(jmp_pin[g]),
+          .status_sel(status_sel[g]),
           .gpio_in(gpio_in_full),
           .pin_wr_mask(pmask[g]), .pin_wr_data(pdata[g]),
           .dir_wr_mask(dmask[g]), .dir_wr_data(ddata[g]),
@@ -293,6 +311,8 @@ module tt_um_sulems6_metastable (
         4'h5: spi_rdata = gpio_in_full[15:8];
         4'h6: spi_rdata = {3'd0, pc[0]};
         4'h7: spi_rdata = {3'd0, pc[1]};
+        4'h8: spi_rdata = {rx_level[0], tx_level[0]};
+        4'h9: spi_rdata = {rx_level[1], tx_level[1]};
         default: spi_rdata = 8'd0;
       endcase
     end else if (spi_addr_is_sm) begin
@@ -310,6 +330,7 @@ module tt_um_sulems6_metastable (
         4'hA: spi_rdata = pin_side[rd_sm1];
         4'hB: spi_rdata = {4'd0, jmp_pin[rd_sm1]};
         4'hD: spi_rdata = rx_rdata[rd_sm1];
+        4'hE: spi_rdata = {3'd0, status_cfg[rd_sm1]};
         default: spi_rdata = 8'd0;
       endcase
     end else begin

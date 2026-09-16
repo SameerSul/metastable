@@ -14,11 +14,11 @@ from metastable import (
     MDST_X, MDST_Y, MDST_EXEC, MDST_ISR, M_INV, M_REV,
     SDST_PINS, SDST_PINDIRS, SDST_X, SDST_Y,
     C_XDEC, C_YDEC, C_XNEY, C_PIN, C_NOTOSRE, W_PIN, W_GPIO, W_IRQ,
-    R_CTRL, R_FSTAT, R_IRQ, R_IRQ_MASK, R_GPIO_IN_H, R_PC0, SM,
+    R_CTRL, R_FSTAT, R_IRQ, R_IRQ_MASK, R_GPIO_IN_H, R_PC0, R_FLEVEL0, SM,
     CLKDIV_INT_L, CLKDIV_FRAC, WRAP_TOP, WRAP_BOTTOM, SHIFTCTRL, THRESH,
     PIN_OUT, PIN_SET, PIN_IN, PIN_SIDE, JMP_PIN,
     AUTOPULL, AUTOPUSH, SIDE_OPT, SIDE_PINDIR,
-    TXF, RXF,
+    TXF, RXF, STATUS_CFG, STATUS_RX,
 )
 
 
@@ -319,6 +319,16 @@ async def test_mov_ops(dut):
     exp = [~b & 0xFF, 0x5C, 0xFF, b]  # rev(0x3A) = 0x5C
     assert got == exp, f"MOV results {got} != {exp}"
 
+    # second pass: STATUS reconfigured to RX level < 2; two pushes have
+    # landed by the time MOV STATUS runs, so it must now read all-zeros
+    await spi.write(SM(0) + STATUS_CFG, STATUS_RX | 2)
+    await spi.write(R_CTRL, 0x11)
+    await spi.write(SM(0) + TXF, b)
+    await spi.write(SM(0) + TXF, t)
+    got = await drain_rx(spi, dut, 0, 4)
+    exp = [~b & 0xFF, 0x5C, 0x00, b]
+    assert got == exp, f"MOV results (RX status) {got} != {exp}"
+
 
 @cocotb.test()
 async def test_irq_handshake(dut):
@@ -433,9 +443,9 @@ async def test_fifo_semantics(dut):
         PULL(block=0),               # 1: TX empty -> OSR = X
         MOV(MDST_ISR, SRC_OSR),      # 2:
         PUSH(block=1),               # 3: push 26
-        SET(SDST_Y, 4),              # 4:
+        SET(SDST_Y, 8),              # 4:
         MOV(MDST_ISR, SRC_Y),        # 5:
-        PUSH(block=1),               # 6: push 4,3,2,1,0 (stalls on full)
+        PUSH(block=1),               # 6: push 8..0 (stalls on full RX)
         JMP(5, C_YDEC),              # 7:
         IN_(SRC_NULL, 2),            # 8: isr_cnt = 2
         PUSH(iffull=1, block=1),     # 9: below threshold 4 -> no-op
@@ -453,7 +463,7 @@ async def test_fifo_semantics(dut):
 
     await spi.write(R_CTRL, 0x11)
 
-    # SM runs at div 1: RX (4 deep) must fill and stall the SM
+    # SM runs at div 1: RX (8 deep) must fill and stall the SM
     full = False
     for _ in range(20):
         fstat = (await spi.read(R_FSTAT, 1))[0]
@@ -463,9 +473,11 @@ async def test_fifo_semantics(dut):
         await ClockCycles(dut.clk, 10)
     assert full, "RX FIFO never filled under backpressure"
     assert dut.uo_out.value.binstr[-6] == "1", "SM0 not stalled on full RX"
+    flevel = (await spi.read(R_FLEVEL0, 1))[0]
+    assert flevel == 0x80, f"FLEVEL0 {flevel:#04x} != 0x80 (RX 8, TX 0)"
 
-    got = await drain_rx(spi, dut, 0, 8)
-    exp = [26, 4, 3, 2, 1, 0, 0, 30]
+    got = await drain_rx(spi, dut, 0, 12)
+    exp = [26, 8, 7, 6, 5, 4, 3, 2, 1, 0, 0, 30]
     assert got == exp, f"FIFO sequence {got} != {exp}"
 
 
