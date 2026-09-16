@@ -21,6 +21,10 @@
  *   111 SET   dst[7:5] imm[4:0]    dst: 0 PINS,1 X,2 Y,4 PINDIRS
  *
  * Shift counts n: 1..8 (0 or >8 means 8).
+ * Side-set: side_count MSBs of the delay/side field drive side_base pins on
+ * every attempt (even stalled). With side_opt, dss[4] is a per-instruction
+ * enable and the side bits shift down one. With side_pindir, side-set
+ * drives pin directions instead of pin values (open-drain protocols).
  * MOV EXEC injects {8'h00, src} as the next instruction (i.e. a JMP with
  * zero delay), enabling computed jumps from any 8-bit source.
  */
@@ -51,6 +55,8 @@ module pio_sm (
     input  wire [3:0]  in_base,
     input  wire [3:0]  side_base,
     input  wire [1:0]  side_count,    // 0..3
+    input  wire        side_opt,      // dss[4] = per-instruction side enable
+    input  wire        side_pindir,   // side-set drives pindirs, not pins
     input  wire [3:0]  jmp_pin,
     // pins
     input  wire [15:0] gpio_in,
@@ -131,13 +137,25 @@ module pio_sm (
 
   reg [4:0] delay_field;
   reg [2:0] side_val;
+  reg       side_en;
   always @* begin
-    case (side_count)
-      2'd0: begin side_val = 3'd0;             delay_field = dss;               end
-      2'd1: begin side_val = {2'b00, dss[4]};  delay_field = {1'b0, dss[3:0]};  end
-      2'd2: begin side_val = {1'b0, dss[4:3]}; delay_field = {2'b00, dss[2:0]}; end
-      2'd3: begin side_val = dss[4:2];         delay_field = {3'b000, dss[1:0]};end
-    endcase
+    if (side_opt && side_count != 2'd0) begin
+      // dss[4] is the per-instruction side-set enable; side bits shift down
+      side_en = dss[4];
+      case (side_count)
+        2'd1:    begin side_val = {2'b00, dss[3]};  delay_field = {2'b00, dss[2:0]}; end
+        2'd2:    begin side_val = {1'b0, dss[3:2]}; delay_field = {3'b000, dss[1:0]};end
+        default: begin side_val = dss[3:1];         delay_field = {4'b0000, dss[0]}; end
+      endcase
+    end else begin
+      side_en = (side_count != 2'd0);
+      case (side_count)
+        2'd0: begin side_val = 3'd0;             delay_field = dss;               end
+        2'd1: begin side_val = {2'b00, dss[4]};  delay_field = {1'b0, dss[3:0]};  end
+        2'd2: begin side_val = {1'b0, dss[4:3]}; delay_field = {2'b00, dss[2:0]}; end
+        2'd3: begin side_val = dss[4:2];         delay_field = {3'b000, dss[1:0]};end
+      endcase
+    end
   end
 
   wire [3:0] eff_n     = (ci[4:0] == 5'd0 || ci[4:0] > 5'd8) ? 4'd8 : ci[3:0];
@@ -427,10 +445,16 @@ module pio_sm (
     // side-set: applies on every attempt, even when stalled; wins conflicts
     pin_wr_mask = op_pin_mask;
     pin_wr_data = op_pin_data;
-    if (attempt && side_count != 2'd0) begin
-      pin_wr_mask = op_pin_mask | pin_mask(side_base, {2'd0, side_count});
-      pin_wr_data = (op_pin_data & ~pin_mask(side_base, {2'd0, side_count}))
-                  | pin_spread(side_base, {2'd0, side_count}, {5'd0, side_val});
+    if (attempt && side_en) begin
+      if (side_pindir) begin
+        dir_wr_mask = dir_wr_mask | pin_mask(side_base, {2'd0, side_count});
+        dir_wr_data = (dir_wr_data & ~pin_mask(side_base, {2'd0, side_count}))
+                    | pin_spread(side_base, {2'd0, side_count}, {5'd0, side_val});
+      end else begin
+        pin_wr_mask = op_pin_mask | pin_mask(side_base, {2'd0, side_count});
+        pin_wr_data = (op_pin_data & ~pin_mask(side_base, {2'd0, side_count}))
+                    | pin_spread(side_base, {2'd0, side_count}, {5'd0, side_val});
+      end
     end
   end
 

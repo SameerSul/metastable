@@ -26,7 +26,7 @@
  *     +7 PIN_OUT       [3:0] base [7:4] count
  *     +8 PIN_SET       [3:0] base [6:4] count
  *     +9 PIN_IN        [3:0] base
- *     +A PIN_SIDE      [3:0] base [5:4] count
+ *     +A PIN_SIDE      [3:0] base [5:4] count [6] opt [7] pindir
  *     +B JMP_PIN       [3:0] pin
  *     +C TXF (write)   +D RXF (read)
  */
@@ -116,7 +116,7 @@ module tt_um_sulems6_metastable (
   reg [7:0]  pin_out    [0:1];
   reg [6:0]  pin_set    [0:1];
   reg [3:0]  pin_in     [0:1];
-  reg [5:0]  pin_side   [0:1];
+  reg [7:0]  pin_side   [0:1];
   reg [3:0]  jmp_pin    [0:1];
 
   wire       cfg_sm1 = (spi_addr[6:4] == 3'b110);
@@ -137,7 +137,7 @@ module tt_um_sulems6_metastable (
         pin_out[k]   <= 8'd0;
         pin_set[k]   <= 7'd0;
         pin_in[k]    <= 4'd0;
-        pin_side[k]  <= 6'd0;
+        pin_side[k]  <= 8'd0;
         jmp_pin[k]   <= 4'd0;
       end
     end else if (spi_wr) begin
@@ -155,7 +155,7 @@ module tt_um_sulems6_metastable (
           4'h7: pin_out[cfg_sm1]       <= spi_wdata;
           4'h8: pin_set[cfg_sm1]       <= spi_wdata[6:0];
           4'h9: pin_in[cfg_sm1]        <= spi_wdata[3:0];
-          4'hA: pin_side[cfg_sm1]      <= spi_wdata[5:0];
+          4'hA: pin_side[cfg_sm1]      <= spi_wdata;
           4'hB: jmp_pin[cfg_sm1]       <= spi_wdata[3:0];
           default: ;
         endcase
@@ -233,6 +233,7 @@ module tt_um_sulems6_metastable (
           .set_base(pin_set[g][3:0]), .set_count(pin_set[g][6:4]),
           .in_base(pin_in[g]),
           .side_base(pin_side[g][3:0]), .side_count(pin_side[g][5:4]),
+          .side_opt(pin_side[g][6]), .side_pindir(pin_side[g][7]),
           .jmp_pin(jmp_pin[g]),
           .gpio_in(gpio_in_full),
           .pin_wr_mask(pmask[g]), .pin_wr_data(pdata[g]),
@@ -306,7 +307,7 @@ module tt_um_sulems6_metastable (
         4'h7: spi_rdata = pin_out[rd_sm1];
         4'h8: spi_rdata = {1'b0, pin_set[rd_sm1]};
         4'h9: spi_rdata = {4'd0, pin_in[rd_sm1]};
-        4'hA: spi_rdata = {2'd0, pin_side[rd_sm1]};
+        4'hA: spi_rdata = pin_side[rd_sm1];
         4'hB: spi_rdata = {4'd0, jmp_pin[rd_sm1]};
         4'hD: spi_rdata = rx_rdata[rd_sm1];
         default: spi_rdata = 8'd0;

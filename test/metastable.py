@@ -24,9 +24,23 @@ W_GPIO, W_PIN, W_IRQ = 0, 1, 2
 
 def _dss(delay, side):
     # side must be pre-positioned: value << (5 - side_count),
-    # e.g. side=0x10 drives 1 on the side-set pin when side_count == 1
+    # e.g. side=0x10 drives 1 on the side-set pin when side_count == 1.
+    # Use side(val, count, opt) to build this.
     assert 0 <= delay <= 31
     return ((delay | side) & 0x1F) << 8
+
+
+def side(val, count, opt=False):
+    """Position a side-set value for the delay/side field.
+
+    With opt=True (PIN_SIDE bit 6 set), bit 4 is the per-instruction
+    enable and the side bits sit one position lower; instructions
+    without side() then leave the side-set pins untouched.
+    """
+    assert 1 <= count <= 3 and 0 <= val < (1 << count)
+    if opt:
+        return 0x10 | (val << (4 - count))
+    return val << (5 - count)
 
 
 def JMP(addr, cond=C_ALWAYS, delay=0, side=0):
@@ -74,6 +88,9 @@ TXF, RXF = 0xC, 0xD
 
 # SHIFTCTRL bits
 AUTOPULL, AUTOPUSH, OUT_RIGHT, IN_RIGHT = 1, 2, 4, 8
+
+# PIN_SIDE bits: [3:0] base, [5:4] count, [6] optional, [7] drive pindirs
+SIDE_OPT, SIDE_PINDIR = 0x40, 0x80
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +160,59 @@ async def trace_pin0(dut):
             t = cocotb.utils.get_sim_time("ns")
             dut._log.info(f"GPIO0 out={cur[0]} oe={cur[1]} @ {t}ns")
             prev = cur
+
+
+class I2CSlave:
+    """Open-drain I2C bus model + slave. SDA = GPIO0, SCL = GPIO1.
+
+    Resolves the wired-AND bus from the DUT's uio_out/uio_oe and its own
+    ACK driver (released lines pull high), reflects the result onto
+    uio_in, samples data on SCL rise, ACKs every byte, and records
+    START/STOP conditions. Other uio bits are looped back as usual.
+    """
+
+    def __init__(self, dut):
+        self.dut = dut
+        self.bytes = []
+        self.started = False
+        self.stopped = False
+        self._ack = False
+        self._bit = 0
+        self._sh = 0
+
+    async def run(self):
+        dut = self.dut
+        prev_sda, prev_scl = 1, 1
+        while True:
+            await RisingEdge(dut.clk)
+            try:
+                out = int(dut.uio_out.value)
+                oe = int(dut.uio_oe.value)
+            except ValueError:
+                out, oe = 0, 0
+            sda = 0 if ((oe & ~out & 1) or self._ack) else 1
+            scl = 0 if (oe & ~out & 2) else 1
+            if scl and prev_scl:  # SDA edge while SCL high
+                if prev_sda and not sda:
+                    self.started = True
+                    self._bit, self._sh = 0, 0
+                elif sda and not prev_sda:
+                    self.started = False
+                    self.stopped = True
+            if self.started:
+                if scl and not prev_scl:  # sample on SCL rise
+                    self._bit += 1
+                    if self._bit <= 8:
+                        self._sh = ((self._sh << 1) | sda) & 0xFF
+                elif prev_scl and not scl:  # drive on SCL fall
+                    if self._bit == 8:
+                        self.bytes.append(self._sh)
+                        self._ack = True
+                    elif self._bit == 9:
+                        self._ack = False
+                        self._bit, self._sh = 0, 0
+            dut.uio_in.value = (out & oe & 0xFC) | (scl << 1) | sda
+            prev_sda, prev_scl = sda, scl
 
 
 async def uio_loopback(dut):
