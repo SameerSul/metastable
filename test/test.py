@@ -10,10 +10,10 @@ from metastable import (
     SpiHost, uio_loopback, I2CSlave, side,
     JMP, WAIT, IN_, OUT, PUSH, PULL, MOV, IRQ, SET,
     SRC_PINS, SRC_X, SRC_Y, SRC_NULL, SRC_STATUS, SRC_OSR,
-    ODST_PINS, ODST_NULL, ODST_PINDIRS, ODST_PC, ODST_ISR,
+    ODST_PINS, ODST_X, ODST_NULL, ODST_PINDIRS, ODST_PC, ODST_ISR,
     MDST_X, MDST_Y, MDST_EXEC, MDST_ISR, M_INV, M_REV,
     SDST_PINS, SDST_PINDIRS, SDST_X, SDST_Y,
-    C_XDEC, C_YDEC, C_XNEY, C_PIN, C_NOTOSRE, W_PIN, W_GPIO, W_IRQ,
+    C_NOTX, C_XDEC, C_YDEC, C_XNEY, C_PIN, C_NOTOSRE, W_PIN, W_GPIO, W_IRQ,
     R_CTRL, R_FSTAT, R_IRQ, R_IRQ_MASK, R_GPIO_IN_H, R_PC0, R_FLEVEL0, SM,
     CLKDIV_INT_L, CLKDIV_FRAC, WRAP_TOP, WRAP_BOTTOM, SHIFTCTRL, THRESH,
     PIN_OUT, PIN_SET, PIN_IN, PIN_SIDE, JMP_PIN,
@@ -527,3 +527,60 @@ async def test_clkdiv_restart(dut):
     assert fstat & 0x01, "restart did not flush TX FIFO"
     pc0 = (await spi.read(R_PC0, 1))[0]
     assert pc0 == 0, f"PC0 {pc0} != wrap_bottom after restart"
+
+
+@cocotb.test()
+async def test_manchester(dut):
+    """SM0 transmits IEEE 802.3 Manchester on GPIO0; SM1 decodes it.
+
+    Each bit is 8 SM ticks with a guaranteed mid-bit transition ('1' =
+    rising, '0' = falling). The receiver locks onto the first mid-bit
+    rising edge of an 0xAA preamble, then samples the second half of
+    every bit at the transmitter's rate (same clock, zero drift).
+    """
+    spi = await setup(dut)
+    cocotb.start_soon(uio_loopback(dut))
+
+    OPT = True
+    LO, HI = side(0, 1, OPT), side(1, 1, OPT)
+    tx_prog = [
+        SET(SDST_PINDIRS, 1),                  # 0: GPIO0 output, idle low
+        OUT(ODST_X, 1),                        # 1: next bit (autopull)
+        JMP(5, C_NOTX),                        # 2: 0 -> falling symbol
+        MOV(MDST_Y, SRC_Y, side=LO, delay=3),  # 3: '1': low half
+        JMP(1, side=HI, delay=1),              # 4:      high half (+1,2)
+        MOV(MDST_Y, SRC_Y, side=HI, delay=3),  # 5: '0': high half
+        JMP(1, side=LO, delay=1),              # 6:      low half (+1,2)
+    ]
+    RX0 = 8
+    rx_prog = [
+        WAIT(1, W_GPIO, 0),                    # 8: first mid-bit rising edge
+        IN_(SRC_PINS, 1, delay=6),             # 9: sample 2nd half of bit
+        JMP(9),                                # 10: 8 ticks per bit
+    ]
+    await spi.load_program(0, tx_prog)
+    await spi.load_program(RX0, rx_prog)
+
+    # div 8: one byte on the wire (512 clk) outlasts a host FIFO write
+    await spi.write(SM(0) + CLKDIV_INT_L, 8)
+    await spi.write(SM(0) + WRAP_TOP, 6)
+    await spi.write(SM(0) + WRAP_BOTTOM, 0)
+    await spi.write(SM(0) + SHIFTCTRL, AUTOPULL)      # MSB first
+    await spi.write(SM(0) + PIN_SET, 0x10)            # GPIO0 dir
+    await spi.write(SM(0) + PIN_SIDE, SIDE_OPT | 0x10)  # GPIO0 value
+
+    await spi.write(SM(1) + CLKDIV_INT_L, 8)
+    await spi.write(SM(1) + WRAP_TOP, 10)
+    await spi.write(SM(1) + WRAP_BOTTOM, RX0)
+    await spi.write(SM(1) + SHIFTCTRL, AUTOPUSH)      # MSB first
+    await spi.write(SM(1) + PIN_IN, 0)
+
+    await spi.write(R_CTRL, 0x33)
+    payload = [0x0F, 0x96, 0x55, 0xC3]
+    for b in [0xAA] + payload:  # preamble syncs the receiver
+        await spi.write(SM(0) + TXF, b)
+
+    # the receiver free-runs after the frame, so only the first bytes count
+    got = await drain_rx(spi, dut, 1, 5)
+    exp = [0xAA] + payload
+    assert got == exp, f"Manchester RX {got} != {exp}"
