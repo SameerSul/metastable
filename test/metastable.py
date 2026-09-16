@@ -79,6 +79,7 @@ def SET(dst, imm, delay=0, side=0):
 
 R_CTRL, R_FSTAT, R_IRQ, R_IRQ_MASK = 0x40, 0x41, 0x42, 0x43
 R_GPIO_IN_L, R_GPIO_IN_H, R_PC0, R_PC1 = 0x44, 0x45, 0x46, 0x47
+R_FLEVEL0, R_FLEVEL1 = 0x48, 0x49  # [3:0] TX level, [7:4] RX level
 
 def SM(n):  # per-SM register base
     return 0x50 + 0x10 * n
@@ -86,7 +87,10 @@ def SM(n):  # per-SM register base
 CLKDIV_INT_L, CLKDIV_INT_H, CLKDIV_FRAC = 0x0, 0x1, 0x2
 WRAP_TOP, WRAP_BOTTOM, SHIFTCTRL, THRESH = 0x3, 0x4, 0x5, 0x6
 PIN_OUT, PIN_SET, PIN_IN, PIN_SIDE, JMP_PIN = 0x7, 0x8, 0x9, 0xA, 0xB
-TXF, RXF = 0xC, 0xD
+TXF, RXF, STATUS_CFG = 0xC, 0xD, 0xE
+
+# STATUS_CFG bits: [3:0] level N, [4] select RX (default TX)
+STATUS_RX = 0x10
 
 # SHIFTCTRL bits
 AUTOPULL, AUTOPUSH, OUT_RIGHT, IN_RIGHT = 1, 2, 4, 8

@@ -24,13 +24,15 @@ cycle-exact. Side-set can be made optional per instruction (an enable bit
 replaces the top field bit) and can drive pin *directions* instead of
 values, for open-drain protocols like I2C. Each SM has a fractional (16.8) clock divider, 8-bit OSR/ISR
 shift registers with configurable direction plus autopull/autopush, X/Y
-scratch registers, and 4-deep TX/RX FIFOs.
+scratch registers, and 8-deep TX/RX FIFOs. `MOV STATUS` reads all-ones
+while a configurable FIFO's fill level is below a per-SM threshold, for
+flow-control in emulated protocols.
 
 The host talks to the chip over a mode-0 SPI slave: one command byte
 `{RW, ADDR[6:0]}` followed by data bytes with address auto-increment
 (held for FIFO registers). The register map covers instruction memory,
 per-SM configuration (clock divider, wrap region, shift control, pin
-mapping), FIFO access, GPIO readback, and IRQ flags.
+mapping), FIFO access and fill levels, GPIO readback, and IRQ flags.
 
 The 16-entry GPIO space maps to: 8 bidirectional pins (`uio`, direction
 controlled at runtime via `SET/OUT PINDIRS`), 5 input-only pins

@@ -64,6 +64,8 @@ module pio_sm (
     output reg  [15:0] pin_wr_data,
     output reg  [15:0] dir_wr_mask,
     output reg  [15:0] dir_wr_data,
+    // MOV STATUS source (project-level FIFO level compare)
+    input  wire        status_sel,
     // TX FIFO (host -> SM)
     input  wire [7:0]  tx_rdata,
     input  wire        tx_empty,
@@ -370,7 +372,7 @@ module pio_sm (
           3'd1: mov_val = x;
           3'd2: mov_val = y;
           3'd3: mov_val = 8'd0;
-          3'd5: mov_val = tx_empty ? 8'hFF : 8'h00; // STATUS
+          3'd5: mov_val = status_sel ? 8'hFF : 8'h00; // STATUS
           3'd6: mov_val = isr;
           3'd7: mov_val = osr;
           default: mov_val = 8'd0;
