@@ -7,12 +7,15 @@ from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles
 
 from metastable import (
-    SpiHost, uio_loopback,
+    SpiHost, uio_loopback, I2CSlave, side,
     JMP, WAIT, IN_, OUT, PUSH, PULL, MOV, IRQ, SET,
-    SRC_PINS, ODST_PINS, SDST_PINS, SDST_PINDIRS, SDST_X,
-    C_XDEC, W_PIN,
+    SRC_PINS, SRC_Y, ODST_PINS, ODST_PINDIRS, MDST_Y,
+    SDST_PINS, SDST_PINDIRS, SDST_X, SDST_Y,
+    C_XDEC, C_YDEC, W_PIN, W_GPIO,
     R_CTRL, R_FSTAT, R_IRQ, R_GPIO_IN_H, SM,
-    CLKDIV_INT_L, WRAP_TOP, WRAP_BOTTOM, PIN_OUT, PIN_SET, PIN_IN, PIN_SIDE,
+    CLKDIV_INT_L, WRAP_TOP, WRAP_BOTTOM, SHIFTCTRL,
+    PIN_OUT, PIN_SET, PIN_IN, PIN_SIDE,
+    AUTOPULL, AUTOPUSH, SIDE_OPT, SIDE_PINDIR,
     TXF, RXF,
 )
 
@@ -122,3 +125,142 @@ async def test_uart_loopback(dut):
         await ClockCycles(dut.clk, 50)
 
     assert received == payload, f"UART loopback {received} != {payload}"
+
+
+@cocotb.test()
+async def test_spi_master_slave(dut):
+    """SM0 is a mode-0 SPI master (optional side-set SCK), SM1 the slave.
+
+    GPIO0 = SCK, GPIO1 = MOSI, GPIO2 = MISO. Full duplex: master TX bytes
+    arrive in the slave's RX FIFO and vice versa, MSB first.
+    """
+    spi = await setup(dut)
+    cocotb.start_soon(uio_loopback(dut))
+
+    OPT = True  # per-instruction side-set: only OUT/IN/JMP touch SCK
+    m_prog = [
+        SET(SDST_PINDIRS, 3),                            # 0: SCK+MOSI outputs
+        SET(SDST_X, 7),                                  # 1: bit counter
+        OUT(ODST_PINS, 1, side=side(0, 1, OPT), delay=1),  # 2: MOSI, SCK low
+        IN_(SRC_PINS, 1, side=side(1, 1, OPT)),          # 3: sample on rise
+        JMP(2, C_XDEC, side=side(1, 1, OPT)),            # 4: SCK high 2nd half
+    ]
+    # slave: event-driven off SCK edges, runs at div 1 (4x master tick rate)
+    S0 = 8
+    s_prog = [
+        SET(SDST_PINDIRS, 1),    # 8: MISO output
+        OUT(ODST_PINS, 1),       # 9: drive MISO while SCK low
+        WAIT(1, W_GPIO, 0),      # 10: SCK rise
+        IN_(SRC_PINS, 1),        # 11: sample MOSI
+        WAIT(0, W_GPIO, 0),      # 12: SCK fall
+    ]
+
+    await spi.load_program(0, m_prog)
+    await spi.load_program(S0, s_prog)
+
+    # SM0 master: div 8 (SCK low phase must exceed the slave's ~11 clk
+    # response latency: pin router + pad loopback + two 2FF synchronizers)
+    await spi.write(SM(0) + CLKDIV_INT_L, 8)
+    await spi.write(SM(0) + WRAP_TOP, 4)
+    await spi.write(SM(0) + WRAP_BOTTOM, 0)
+    await spi.write(SM(0) + SHIFTCTRL, AUTOPULL | AUTOPUSH)
+    await spi.write(SM(0) + PIN_OUT, 0x11)             # MOSI: base 1, count 1
+    await spi.write(SM(0) + PIN_SET, 0x20)             # base 0, count 2
+    await spi.write(SM(0) + PIN_IN, 2)                 # MISO
+    await spi.write(SM(0) + PIN_SIDE, SIDE_OPT | 0x10)  # SCK: base 0, count 1
+
+    # SM1 slave: div 1, MSB first, autopull+autopush
+    await spi.write(SM(1) + CLKDIV_INT_L, 1)
+    await spi.write(SM(1) + WRAP_TOP, 12)
+    await spi.write(SM(1) + WRAP_BOTTOM, S0)
+    await spi.write(SM(1) + SHIFTCTRL, AUTOPULL | AUTOPUSH)
+    await spi.write(SM(1) + PIN_OUT, 0x12)             # MISO: base 2, count 1
+    await spi.write(SM(1) + PIN_SET, 0x12)             # MISO dir
+    await spi.write(SM(1) + PIN_IN, 1)                 # MOSI
+
+    # start both SMs first (restart flushes FIFOs): they stall at OUT with
+    # SCK idle low. Then load the slave's responses, then the master's data.
+    await spi.write(R_CTRL, 0x33)
+    mosi_bytes = [0x9E, 0x01, 0x55, 0xC3]
+    miso_bytes = [0xEF, 0x40, 0xAA, 0x81]
+    for b in miso_bytes:
+        await spi.write(SM(1) + TXF, b)
+    for b in mosi_bytes:
+        await spi.write(SM(0) + TXF, b)
+
+    m_rx, s_rx = [], []
+    for _ in range(300):
+        fstat = (await spi.read(R_FSTAT, 1))[0]
+        if not fstat & 0x04:  # SM0 RX non-empty
+            m_rx += await spi.read(SM(0) + RXF, 1)
+        if not fstat & 0x40:  # SM1 RX non-empty
+            s_rx += await spi.read(SM(1) + RXF, 1)
+        if len(m_rx) == 4 and len(s_rx) == 4:
+            break
+        await ClockCycles(dut.clk, 20)
+
+    assert s_rx == mosi_bytes, f"slave RX {s_rx} != {mosi_bytes}"
+    assert m_rx == miso_bytes, f"master RX {m_rx} != {miso_bytes}"
+
+
+@cocotb.test()
+async def test_i2c_master(dut):
+    """SM0 bit-bangs an open-drain I2C master write.
+
+    SDA = GPIO0 (OUT/SET pindirs), SCL = GPIO1 (optional side-set routed
+    to pin directions). Pin output values stay latched at 0, so dir=1
+    drives low and dir=0 releases to the pull-up: true open drain. A
+    Python bus model supplies the pull-ups and a slave that ACKs each
+    byte; the ACK bits come back to the host through the RX FIFO.
+    """
+    spi = await setup(dut)
+    slave = I2CSlave(dut)
+    cocotb.start_soon(slave.run())
+
+    OPT = True
+    LO = side(1, 1, OPT)  # SCL dir=1: drive low
+    HI = side(0, 1, OPT)  # SCL dir=0: release high
+    prog = [
+        SET(SDST_PINDIRS, 0),                    # 0: SDA released (bus idle)
+        PULL(block=1),                           # 1: wait for first byte
+        SET(SDST_PINDIRS, 1, delay=7),           # 2: START: SDA low, SCL high
+        SET(SDST_Y, 1),                          # 3: byte count - 1
+        SET(SDST_X, 7, side=LO, delay=1),        # 4: SCL low, bit counter
+        OUT(ODST_PINDIRS, 1, side=LO, delay=3),  # 5: SDA <= bit (autopull)
+        JMP(5, C_XDEC, side=HI, delay=3),        # 6: SCL high, slave samples
+        SET(SDST_PINDIRS, 0, side=LO, delay=3),  # 7: release SDA for ACK
+        IN_(SRC_PINS, 1, side=HI, delay=3),      # 8: sample ACK on SCL rise
+        JMP(4, C_YDEC, side=LO, delay=1),        # 9: next byte
+        SET(SDST_PINDIRS, 1, side=LO, delay=3),  # 10: SDA low ahead of STOP
+        MOV(MDST_Y, SRC_Y, side=HI, delay=3),    # 11: SCL high, SDA held low
+        SET(SDST_PINDIRS, 0, delay=7),           # 12: STOP: SDA rises
+        PUSH(block=0),                           # 13: ACK bits -> host
+    ]
+    await spi.load_program(0, prog)
+
+    await spi.write(SM(0) + CLKDIV_INT_L, 8)
+    await spi.write(SM(0) + WRAP_TOP, 13)
+    await spi.write(SM(0) + WRAP_BOTTOM, 0)
+    await spi.write(SM(0) + SHIFTCTRL, AUTOPULL)  # shift left, MSB first
+    await spi.write(SM(0) + PIN_OUT, 0x10)        # SDA: base 0, count 1
+    await spi.write(SM(0) + PIN_SET, 0x10)        # SDA: base 0, count 1
+    await spi.write(SM(0) + PIN_IN, 0)            # SDA
+    # SCL: base 1, count 1, optional, drives pindirs
+    await spi.write(SM(0) + PIN_SIDE, SIDE_PINDIR | SIDE_OPT | 0x11)
+
+    await spi.write(R_CTRL, 0x11)   # SM0 enable + restart (flushes FIFOs)
+    wire_bytes = [0xA4, 0x57]       # address 0x52 + W, one data byte
+    for b in wire_bytes:
+        await spi.write(SM(0) + TXF, ~b & 0xFF)  # dir=1 pulls the line low
+
+    acks = []
+    for _ in range(300):
+        fstat = (await spi.read(R_FSTAT, 1))[0]
+        if not fstat & 0x04:  # SM0 RX non-empty
+            acks = await spi.read(SM(0) + RXF, 1)
+            break
+        await ClockCycles(dut.clk, 50)
+
+    assert slave.stopped, "no STOP condition seen"
+    assert slave.bytes == wire_bytes, f"slave got {slave.bytes} != {wire_bytes}"
+    assert acks == [0x00], f"ACK bits {acks[0] if acks else None} != 0x00"

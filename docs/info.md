@@ -20,7 +20,9 @@ from a shared 32-entry instruction memory:
 | 111 | `SET dst, imm` | drive pins/pindirs, load X/Y |
 
 Every instruction carries a 5-bit delay/side-set field, so pin timing is
-cycle-exact. Each SM has a fractional (16.8) clock divider, 8-bit OSR/ISR
+cycle-exact. Side-set can be made optional per instruction (an enable bit
+replaces the top field bit) and can drive pin *directions* instead of
+values, for open-drain protocols like I2C. Each SM has a fractional (16.8) clock divider, 8-bit OSR/ISR
 shift registers with configurable direction plus autopull/autopush, X/Y
 scratch registers, and 4-deep TX/RX FIFOs.
 
@@ -43,10 +45,17 @@ and UART RX simultaneously, full duplex).
 ## How to test
 
 `test/metastable.py` contains a Python ISA assembler and SPI host driver;
-`test/test.py` shows the full flow. The included UART loopback test:
-SM0 runs an 8N1 UART transmitter on GPIO0, SM1 runs a receiver on the
-same pin, bytes pushed into SM0's TX FIFO over SPI come back out of
-SM1's RX FIFO.
+`test/test.py` shows the full flow with three protocol demos:
+
+- **UART loopback**: SM0 runs an 8N1 transmitter on GPIO0, SM1 a
+  receiver on the same pin; bytes pushed into SM0's TX FIFO over SPI
+  come back out of SM1's RX FIFO.
+- **SPI master/slave**: SM0 is a mode-0 master clocking SCK via
+  optional side-set, SM1 a full-duplex slave; both directions verified
+  MSB first with autopull/autopush.
+- **I2C master**: SM0 does an open-drain address + data write (side-set
+  routed to pin directions, output latches held low), against a Python
+  slave model that ACKs each byte.
 
 On the dev board, wire the RP2040 (or any SPI master, clk >= 8x SCK) to
 `SPI_SCK/CS_N/MOSI` on `ui[2:0]` and `SPI_MISO` on `uo[0]`, then:
