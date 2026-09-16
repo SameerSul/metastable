@@ -44,6 +44,27 @@ On restart a state machine begins executing at its `WRAP_BOTTOM`, so the
 two SMs can run independent programs in the shared memory (e.g. UART TX
 and UART RX simultaneously, full duplex).
 
+### Protocol reach
+
+Beyond the UART/SPI/I2C baseline (all in the test suite), the test bench
+demonstrates **Manchester coding** (IEEE 802.3 polarity): 8 ticks per
+bit with a guaranteed mid-bit transition, receiver locks onto the
+preamble's first mid-bit edge. The TX loop needs 4 ticks per half-bit,
+so at 50 MHz / div 1 the ceiling is ~6 Mb/s Manchester — 10BASE-T's
+20 Mbaud is out of reach, but 10BASE-T link pulses (100 us spacing) and
+arbitrary sub-6 Mb/s Manchester links are emulatable.
+
+**USB low-speed (1.5 Mb/s)** analysis: the fractional divider hits the
+bit clock within USB's tolerance (div 4+43/256 = 8 ticks/bit, +0.03%).
+TX is feasible today: drive D+/D- as a 2-bit symbol stream (J, K, SE0)
+via `OUT PINS, 2` — the host pre-computes sync, NRZI, bit stuffing, CRC
+and EOP, packing 4 symbols per FIFO byte. Consumption is 2.67 us per
+FIFO byte vs ~1.3 us per byte for burst SPI writes at SCK = clk/8, so
+the 8-deep FIFO never underruns. RX is not practical beyond short
+captures: NRZI decode + bit unstuffing exceeds the two-SM instruction
+budget, and a raw 4x-oversampled dump (6 MS/s x 2 pins) exceeds the SPI
+drain rate.
+
 ## How to test
 
 `test/metastable.py` contains a Python ISA assembler and SPI host driver;
