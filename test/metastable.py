@@ -147,3 +147,59 @@ async def uio_loopback(dut):
         except ValueError:
             out, oe = 0, 0
         dut.uio_in.value = out & oe
+
+
+class WS2812Decoder:
+    """Pulse-width decoder for WS2812/NeoPixel data on GPIO0 (uio[0]).
+
+    Measures every high pulse against the WS2812B datasheet windows
+    (T0H 250-550 ns, T1H 650-950 ns), shifts bits MSB first, and cuts a
+    frame after a reset-length low gap. Records out-of-spec pulses.
+    """
+
+    RESET_NS = 9000  # datasheet says >50 us; shortened to keep sims fast
+
+    def __init__(self, dut):
+        self.dut = dut
+        self.frames = []   # list of byte lists, one per latched frame
+        self.bad_pulses = []
+        self._bits = []
+
+    def _cut(self):
+        if self._bits:
+            n = len(self._bits) - len(self._bits) % 8
+            frame = [
+                sum(b << (7 - i) for i, b in enumerate(self._bits[k:k + 8]))
+                for k in range(0, n, 8)
+            ]
+            self.frames.append(frame)
+            self._bits = []
+
+    async def run(self):
+        from cocotb.utils import get_sim_time
+        dut = self.dut
+        prev, t_rise, t_fall = 0, None, None
+        while True:
+            await RisingEdge(dut.clk)
+            try:
+                driven = int(dut.uio_oe.value) & 1
+                level = int(dut.uio_out.value) & driven
+            except ValueError:
+                driven, level = 0, 0
+            now = get_sim_time("ns")
+            if level and not prev:
+                t_rise = now
+                t_fall = None
+            elif prev and not level:
+                t_fall = now
+                width = now - t_rise
+                if 250 <= width <= 550:
+                    self._bits.append(0)
+                elif 650 <= width <= 950:
+                    self._bits.append(1)
+                else:
+                    self.bad_pulses.append(width)
+            elif not level and t_fall is not None and now - t_fall > self.RESET_NS:
+                self._cut()
+                t_fall = None
+            prev = level

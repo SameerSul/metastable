@@ -65,6 +65,9 @@ memory read-write, three protocol demos, and ISA corner coverage:
   directions) against a Python slave model that ACKs each byte
 - **Manchester loopback** — SM0 transmits IEEE 802.3 Manchester with a
   mid-bit transition every 8 ticks, SM1 locks onto the preamble and decodes
+- **WS2812 / NeoPixel** — SM0 drives 800 kHz pulse-width-coded LED data
+  (fractional divider at 8 MHz tick); a decoder model checks every pulse
+  against the datasheet windows
 - **ISA coverage** — MOV invert/reverse/STATUS/EXEC, inter-SM IRQ
   handshake + HOST_IRQ, JMP variants, computed jumps, FIFO thresholds and
   backpressure, fractional clock divider, restart semantics
