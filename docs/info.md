@@ -67,8 +67,12 @@ drain rate.
 
 ## How to test
 
-`test/metastable.py` contains a Python ISA assembler and SPI host driver;
-`test/test.py` shows the full flow with three protocol demos:
+`sw/metastable_asm.py` is a Python ISA assembler that runs on CPython and
+MicroPython; `sw/metastable_host.py` is a register-level host driver for
+the demo board's RP2040 (bit-banged mode-0 SPI over `ui[2:0]`/`uo[0]`),
+and `sw/examples/uart_loopback.py` runs the UART demo on silicon. The
+cocotb suite imports the same assembler; `test/test.py` shows the full
+flow with three protocol demos:
 
 - **UART loopback**: SM0 runs an 8N1 transmitter on GPIO0, SM1 a
   receiver on the same pin; bytes pushed into SM0's TX FIFO over SPI

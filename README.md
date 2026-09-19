@@ -42,7 +42,11 @@ Instruction format: `[15:13] opcode | [12:8] delay/side-set | [7:0] operands`
 | 111 | `SET dst, imm` | drive pins/pindirs, load X/Y |
 
 A Python assembler for the ISA lives in
-[test/metastable.py](test/metastable.py), along with an SPI host driver.
+[sw/metastable_asm.py](sw/metastable_asm.py); it runs on CPython and
+MicroPython and is shared by the cocotb suite and the demo-board host
+driver ([sw/metastable_host.py](sw/metastable_host.py)).
+[sw/examples/uart_loopback.py](sw/examples/uart_loopback.py) runs the
+verified UART demo on real silicon from the TT demo board's RP2040.
 
 ## Testing
 
