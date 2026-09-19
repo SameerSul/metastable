@@ -65,6 +65,15 @@ memory read-write, three protocol demos, and ISA corner coverage:
   handshake + HOST_IRQ, JMP variants, computed jumps, FIFO thresholds and
   backpressure, fractional clock divider, restart semantics
 
+## Physical design
+
+[analysis/](analysis/README.md) audits the hardened layout with the proxy
+lenses from [VivaPlace](https://github.com/SameerSul/leetfm-macro-place-challenge-2026)
+(HPWL / density / RUDY congestion + connectivity-inferred hierarchy cohesion):
+22% utilization, congestion headroom everywhere, and a die-spanning scatter of
+SM1's cluster that the worst setup path (+0.34 ns @ slow corner) tracks
+end-to-end.
+
 ## Resources
 
 - [Tiny Tapeout FAQ](https://tinytapeout.com/faq/)
