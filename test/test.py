@@ -7,7 +7,7 @@ from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles
 
 from metastable import (
-    SpiHost, uio_loopback, I2CSlave, side,
+    SpiHost, uio_loopback, I2CSlave, WS2812Decoder, side,
     JMP, WAIT, IN_, OUT, PUSH, PULL, MOV, IRQ, SET,
     SRC_PINS, SRC_X, SRC_Y, SRC_NULL, SRC_STATUS, SRC_OSR,
     ODST_PINS, ODST_X, ODST_NULL, ODST_PINDIRS, ODST_PC, ODST_ISR,
@@ -584,3 +584,50 @@ async def test_manchester(dut):
     got = await drain_rx(spi, dut, 1, 5)
     exp = [0xAA] + payload
     assert got == exp, f"Manchester RX {got} != {exp}"
+
+
+@cocotb.test()
+async def test_ws2812(dut):
+    """SM0 drives WS2812 (NeoPixel) data on GPIO0: 800 kHz, GRB MSB first.
+
+    Fractional divider 6+64/256 gives an 8 MHz tick (125 ns); 10 ticks per
+    bit. '0' = 3 ticks high / 7 low, '1' = 7 high / 3 low -- all four pulse
+    widths inside the WS2812B datasheet windows. A pulse-width decoder model
+    checks every pulse and reassembles the frame.
+    """
+    spi = await setup(dut)
+    cocotb.start_soon(uio_loopback(dut))
+    dec = WS2812Decoder(dut)
+    cocotb.start_soon(dec.run())
+
+    S0, S1 = side(0, 1), side(1, 1)
+    prog = [
+        SET(SDST_PINDIRS, 1),                    # 0: once: GPIO0 output
+        OUT(ODST_X, 1, delay=2, side=S0),        # 1: bitloop: low tail (T3)
+        JMP(4, C_NOTX, delay=2, side=S1),        # 2: high leader (T1)
+        JMP(1, delay=3, side=S1),                # 3: '1': stay high (T2)
+        SET(SDST_PINDIRS, 1, delay=1, side=S0),  # 4: '0': low (pindir refresh)
+        JMP(1, delay=1, side=S0),                # 5: '0': low, next bit
+    ]
+    await spi.load_program(0, prog)
+
+    await spi.write(SM(0) + CLKDIV_INT_L, 6)
+    await spi.write(SM(0) + CLKDIV_FRAC, 64)     # 50 MHz / 6.25 = 8 MHz
+    await spi.write(SM(0) + WRAP_TOP, 5)
+    await spi.write(SM(0) + WRAP_BOTTOM, 0)
+    await spi.write(SM(0) + SHIFTCTRL, AUTOPULL)  # MSB first, 8-bit refill
+    await spi.write(SM(0) + PIN_SET, 0x10)       # base 0, count 1
+    await spi.write(SM(0) + PIN_SIDE, 0x10)      # base 0, count 1, always on
+
+    await spi.write(R_CTRL, 0x11)
+
+    # two LEDs, GRB order: red then an arbitrary colour
+    payload = [0x00, 0xFF, 0x00, 0x30, 0x81, 0xC3]
+    await spi.write(SM(0) + TXF, payload)  # one burst; address holds on FIFO
+
+    # 48 bits x 1.25 us = 60 us, plus the reset gap the decoder needs
+    await ClockCycles(dut.clk, 5000)
+
+    assert not dec.bad_pulses, f"out-of-spec pulses (ns): {dec.bad_pulses}"
+    assert dec.frames, "no frame latched"
+    assert dec.frames[0] == payload, f"WS2812 {dec.frames[0]} != {payload}"
