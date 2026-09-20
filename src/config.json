@@ -55,11 +55,6 @@
 
   "GRT_ALLOW_CONGESTION": 1,
 
-  "//": "Denser placement leaves one marginal post-DRT Metal3 antenna; the GRT-stage",
-  "//": "repair already converges to zero, so add pre-route heuristic diodes instead",
-  "RUN_HEURISTIC_DIODE_INSERTION": 1,
-  "//": "CMOS5L PDK ships DIODE_CELL without the pin; the Odb diode scripts need cell/pin",
-  "DIODE_CELL": "sg13cmos5l_antennanp/A",
 
   "FP_IO_HLENGTH": 2,
   "FP_IO_VLENGTH": 2,
