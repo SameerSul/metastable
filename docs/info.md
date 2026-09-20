@@ -30,9 +30,45 @@ flow-control in emulated protocols.
 
 The host talks to the chip over a mode-0 SPI slave: one command byte
 `{RW, ADDR[6:0]}` followed by data bytes with address auto-increment
-(held for FIFO registers). The register map covers instruction memory,
-per-SM configuration (clock divider, wrap region, shift control, pin
-mapping), FIFO access and fill levels, GPIO readback, and IRQ flags.
+(held for FIFO registers).
+
+### Register map
+
+`0x00-0x3F` is instruction memory, byte-accessed: address `2i` is
+instruction `i` bits `[7:0]`, `2i+1` is bits `[15:8]`.
+
+| Addr | Register | Bits |
+|------|----------|------|
+| 0x40 | CTRL | `[0]` SM0_EN, `[1]` SM1_EN, `[4]` SM0_RESTART, `[5]` SM1_RESTART |
+| 0x41 | FSTAT | `[0]` TX0 empty, `[1]` TX0 full, `[2]` RX0 empty, `[3]` RX0 full; `[7:4]` same for SM1 |
+| 0x42 | IRQ | read flags; write 1 to clear |
+| 0x43 | IRQ_MASK | `HOST_IRQ` pin = `|(IRQ & MASK)` |
+| 0x44 | GPIO_IN_L | pins 7:0 |
+| 0x45 | GPIO_IN_H | pins 15:8 |
+| 0x46 | PC0 | SM0 program counter (debug) |
+| 0x47 | PC1 | SM1 program counter (debug) |
+| 0x48 | FLEVEL0 | `[3:0]` TX fill level, `[7:4]` RX fill level |
+| 0x49 | FLEVEL1 | same for SM1 |
+
+Per-SM configuration at `0x50+n` (SM0) and `0x60+n` (SM1):
+
+| Offset | Register | Bits |
+|--------|----------|------|
+| +0x0 | CLKDIV_INT_L | integer divider `[7:0]` |
+| +0x1 | CLKDIV_INT_H | integer divider `[15:8]` |
+| +0x2 | CLKDIV_FRAC | fractional divider (/256); tick = clk / (int + frac/256) |
+| +0x3 | WRAP_TOP | `[4:0]` |
+| +0x4 | WRAP_BOTTOM | `[4:0]`; restart enters here |
+| +0x5 | SHIFTCTRL | `[0]` autopull, `[1]` autopush, `[2]` out shift right, `[3]` in shift right |
+| +0x6 | THRESH | `[3:0]` pull threshold, `[7:4]` push threshold (0 means 8) |
+| +0x7 | PIN_OUT | `[3:0]` base, `[7:4]` count |
+| +0x8 | PIN_SET | `[3:0]` base, `[6:4]` count |
+| +0x9 | PIN_IN | `[3:0]` base |
+| +0xA | PIN_SIDE | `[3:0]` base, `[5:4]` count, `[6]` optional, `[7]` drive pindirs |
+| +0xB | JMP_PIN | `[3:0]` pin |
+| +0xC | TXF | write: push TX FIFO (address holds) |
+| +0xD | RXF | read: pop RX FIFO (address holds) |
+| +0xE | STATUS_CFG | `MOV STATUS` = all-ones while selected FIFO level < N: `[3:0]` N, `[4]` select (0 TX, 1 RX); reset 0x01 = TX empty |
 
 The 16-entry GPIO space maps to: 8 bidirectional pins (`uio`, direction
 controlled at runtime via `SET/OUT PINDIRS`), 5 input-only pins
