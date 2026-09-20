@@ -42,7 +42,11 @@ Instruction format: `[15:13] opcode | [12:8] delay/side-set | [7:0] operands`
 | 111 | `SET dst, imm` | drive pins/pindirs, load X/Y |
 
 A Python assembler for the ISA lives in
-[test/metastable.py](test/metastable.py), along with an SPI host driver.
+[sw/metastable_asm.py](sw/metastable_asm.py); it runs on CPython and
+MicroPython and is shared by the cocotb suite and the demo-board host
+driver ([sw/metastable_host.py](sw/metastable_host.py)).
+[sw/examples/uart_loopback.py](sw/examples/uart_loopback.py) runs the
+verified UART demo on real silicon from the TT demo board's RP2040.
 
 ## Testing
 
@@ -61,9 +65,21 @@ memory read-write, three protocol demos, and ISA corner coverage:
   directions) against a Python slave model that ACKs each byte
 - **Manchester loopback** — SM0 transmits IEEE 802.3 Manchester with a
   mid-bit transition every 8 ticks, SM1 locks onto the preamble and decodes
+- **WS2812 / NeoPixel** — SM0 drives 800 kHz pulse-width-coded LED data
+  (fractional divider at 8 MHz tick); a decoder model checks every pulse
+  against the datasheet windows
 - **ISA coverage** — MOV invert/reverse/STATUS/EXEC, inter-SM IRQ
   handshake + HOST_IRQ, JMP variants, computed jumps, FIFO thresholds and
   backpressure, fractional clock divider, restart semantics
+
+## Physical design
+
+[analysis/](analysis/README.md) audits the hardened layout with the proxy
+lenses from [VivaPlace](https://github.com/SameerSul/leetfm-macro-place-challenge-2026)
+(HPWL / density / RUDY congestion + connectivity-inferred hierarchy cohesion):
+22% utilization, congestion headroom everywhere, and a die-spanning scatter of
+SM1's cluster that the worst setup path (+0.34 ns @ slow corner) tracks
+end-to-end.
 
 ## Resources
 
