@@ -55,6 +55,10 @@
 
   "GRT_ALLOW_CONGESTION": 1,
 
+  "//": "Denser placement leaves one marginal Metal3 antenna; repair harder",
+  "GRT_ANTENNA_REPAIR_MARGIN": 25,
+  "GRT_ANTENNA_REPAIR_ITERS": 5,
+
   "FP_IO_HLENGTH": 2,
   "FP_IO_VLENGTH": 2,
 
