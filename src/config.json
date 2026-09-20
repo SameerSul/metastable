@@ -55,6 +55,16 @@
 
   "GRT_ALLOW_CONGESTION": 1,
 
+  "//": "Kill the one post-DRT Metal3 antenna: pre-route heuristic diodes on long",
+  "//": "nets. LibreLane requires cell padding > 0 for this step to behave (the",
+  "//": "PDK ships 0, which made DRT blow the 6h CI limit last attempt), and the",
+  "//": "CMOS5L PDK's DIODE_CELL lacks the /pin suffix the Odb scripts need.",
+  "RUN_HEURISTIC_DIODE_INSERTION": 1,
+  "DIODE_CELL": "sg13cmos5l_antennanp/A",
+  "HEURISTIC_ANTENNA_THRESHOLD": 200,
+  "GPL_CELL_PADDING": 2,
+  "DPL_CELL_PADDING": 1,
+
 
   "FP_IO_HLENGTH": 2,
   "FP_IO_VLENGTH": 2,
