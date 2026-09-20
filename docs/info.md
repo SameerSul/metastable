@@ -67,8 +67,12 @@ drain rate.
 
 ## How to test
 
-`test/metastable.py` contains a Python ISA assembler and SPI host driver;
-`test/test.py` shows the full flow with three protocol demos:
+`sw/metastable_asm.py` is a Python ISA assembler that runs on CPython and
+MicroPython; `sw/metastable_host.py` is a register-level host driver for
+the demo board's RP2040 (bit-banged mode-0 SPI over `ui[2:0]`/`uo[0]`),
+and `sw/examples/uart_loopback.py` runs the UART demo on silicon. The
+cocotb suite imports the same assembler; `test/test.py` shows the full
+flow with three protocol demos:
 
 - **UART loopback**: SM0 runs an 8N1 transmitter on GPIO0, SM1 a
   receiver on the same pin; bytes pushed into SM0's TX FIFO over SPI
@@ -79,6 +83,10 @@ drain rate.
 - **I2C master**: SM0 does an open-drain address + data write (side-set
   routed to pin directions, output latches held low), against a Python
   slave model that ACKs each byte.
+- **WS2812 / NeoPixel**: SM0 drives 800 kHz pulse-width-coded LED data
+  (8 MHz fractional tick, 10 ticks/bit); every pulse is checked against
+  the WS2812B datasheet windows and the GRB frame reassembled.
+  `sw/examples/ws2812.py` runs it on silicon.
 
 On the dev board, wire the RP2040 (or any SPI master, clk >= 8x SCK) to
 `SPI_SCK/CS_N/MOSI` on `ui[2:0]` and `SPI_MISO` on `uo[0]`, then:
