@@ -52,9 +52,24 @@ This is the failure mode VivaPlace treats as its primary objective: a proxy
 optimizer has no reason to keep a tightly-connected subsystem together, and
 here the scatter lands directly on the critical path.
 
-Branch `fp-density-75` tests the one available knob
-(`PL_TARGET_DENSITY_PCT` 60 -> 75) to see how much margin tighter packing
-recovers; congestion headroom says it is safe.
+## Experiment: PL_TARGET_DENSITY_PCT 60 -> 75
+
+Branch `fp-density-75` tested the one available knob; congestion headroom
+said tighter packing was safe, and the audit's diagnosis held up:
+
+| Metric | density 60 | density 75 |
+|---|---|---|
+| Setup WS @ slow corner | +0.34 ns | **+1.45 ns** |
+| Hold WS @ fast corner | +0.12 ns | +0.13 ns |
+| HPWL (audit) | 556k um | 530k um |
+| sm0 / sm1 cohesion | 0.50 / 0.32 | 0.57 / 0.36 |
+| fifo1_tx cohesion | 0.31 | 0.38 |
+| Antenna violations | 0 | 1 (Metal3, 2x over) |
+
+4.3x the setup margin from one placement knob — the die-wide scatter, not
+logic depth, was the bottleneck. The one marginal antenna net is repaired
+harder on the same branch (`GRT_ANTENNA_REPAIR_MARGIN` 25) before merging.
+The density-75 placement: ![density 75](floorplan_audit_75.png)
 
 ## Reproducing
 
