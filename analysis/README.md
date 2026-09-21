@@ -70,14 +70,24 @@ said tighter packing was safe, and the audit's diagnosis held up:
 logic depth, was the bottleneck. Merged to `cmos5l`.
 The density-75 placement: ![density 75](floorplan_audit_75.png)
 
-The single antenna is accepted after two repair attempts documented in
-the branch history: raising `GRT_ANTENNA_REPAIR_MARGIN` was a bit-exact
-no-op (the GRT-stage repair already converges to zero; net3308 only
-violates after detailed routing, which this flow never re-repairs), and
-`RUN_HEURISTIC_DIODE_INSERTION` first crashed on a CMOS5L PDK config bug
-(`DIODE_CELL` ships without the `/pin` suffix the Odb scripts require)
-and then, with the pin fixed, made detailed routing blow the 6-hour CI
-job limit under the PDK's zero cell padding. A 2x-over cumulative-area
+The single antenna is accepted after four repair attempts documented in
+the `fp-density-75` branch history: raising `GRT_ANTENNA_REPAIR_MARGIN`
+was a bit-exact no-op (the GRT-stage repair already converges to zero;
+net3308 only violates after detailed routing, which this flow never
+re-repairs), and `RUN_HEURISTIC_DIODE_INSERTION` crashed on a CMOS5L PDK
+config bug (`DIODE_CELL` ships without the `/pin` suffix the Odb scripts
+require), then timed out at 6 h in DRT with the PDK's zero cell padding,
+then reached 0 antennas twice but destroyed the margin both times:
+
+| Padding (GPL/DPL) | Antennas | Setup WS @ slow |
+|---|---|---|
+| 0 / 0 (PDK default, no diodes — shipped) | 1 | **+1.45 ns** |
+| 2 / 1 | 0 | -0.25 ns |
+| 0 / 1 | 0 | +0.01 ns |
+
+The tension is structural: the diode step needs cell padding, padding
+applies to every cell, and re-spreading the placement is exactly what
+the density change was bought to prevent. A 2x-over cumulative-area
 ratio on one buffer input is a modest manufacture-time risk; the 1.1 ns
 of recovered setup margin is kept.
 
