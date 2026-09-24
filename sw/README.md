@@ -11,6 +11,7 @@ Everything runs on CPython and MicroPython (the TT demo board's RP2040).
 | `examples/uart_loopback.py` | SM0 transmits 8N1 on GPIO0, SM1 receives, bytes round-trip over SPI |
 | `examples/ws2812.py` | 800 kHz NeoPixel driver on GPIO0 |
 | `examples/i2c_write.py` | open-drain I2C master write, ACK bits back to the host |
+| `examples/capture_replay.py` | 4-channel snapshot logic analyzer + arbitrary waveform generator on GPIO4-7 |
 
 ## Demo board quick start
 
