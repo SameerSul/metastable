@@ -104,6 +104,24 @@ packet on the wires. RX is not practical beyond short captures: NRZI
 decode + bit unstuffing exceeds the two-SM instruction budget, and a
 raw 4x-oversampled dump (6 MS/s x 2 pins) exceeds the SPI drain rate.
 
+The packet as driven in simulation (rendered by `docs/usb_wave.py` from
+the testbench's captured bus edges):
+
+![USB LS DATA0 packet](usb_ls_wave.png)
+
+**Other named protocols.** JTAG and SWD are natural fits — both are
+host-clocked (the SM sets TCK/SWCLK pace via side-set like the SPI
+master demo, so any rate up to a few MHz works), and SWD's turnaround
+just flips a pin direction with `OUT PINDIRS`. PS/2 host mode (the chip
+receiving from a keyboard) mirrors the demonstrated device mode with
+WAIT on the device's clock edges. CAN at 125-500 kb/s fits the timing
+budget for a fixed frame (bit stuffing precomputed by the host like USB)
+and one SM can monitor RX while the other transmits, but proper
+arbitration - back off within one bit time of seeing a dominant bit you
+did not send - would need the two SMs cooperating through an IRQ flag
+and is untested; a listen-only CAN sniffer at those rates is
+straightforward.
+
 ## How to test
 
 `sw/metastable_asm.py` is a Python ISA assembler that runs on CPython and

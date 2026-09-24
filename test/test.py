@@ -691,6 +691,12 @@ async def test_usb_ls_tx(dut):
     dut._log.info(f"USB LS bit period {bit_ns:.1f} ns ({ppm:+.0f} ppm)")
     assert abs(ppm) < 15000, f"bit rate {ppm:+.0f} ppm outside USB LS +-1.5%"
 
+    # dump the bus edges so docs/usb_wave.py can render the datasheet
+    # figure from the actual simulated waveform
+    import json
+    with open("usb_edges.json", "w") as f:
+        json.dump({"edges": dec.edges, "t_bit": dec.T_BIT_NS}, f)
+
 
 @cocotb.test()
 async def test_random_cosim(dut):
