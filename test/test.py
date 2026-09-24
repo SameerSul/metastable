@@ -9,7 +9,7 @@ from cocotb.triggers import ClockCycles
 from metastable import (
     SpiHost, uio_loopback, I2CSlave, WS2812Decoder, UsbLsDecoder,
     usb_ls_packet_symbols, usb_symbols_to_bytes, usb_crc16,
-    Ps2Host, ps2_frame_bytes, side,
+    Ps2Host, ps2_frame_bytes, nec_transmit, side,
     JMP, WAIT, IN_, OUT, PUSH, PULL, MOV, IRQ, SET,
     SRC_PINS, SRC_X, SRC_Y, SRC_NULL, SRC_STATUS, SRC_OSR,
     ODST_PINS, ODST_X, ODST_NULL, ODST_PINDIRS, ODST_PC, ODST_ISR,
@@ -19,7 +19,7 @@ from metastable import (
     R_CTRL, R_FSTAT, R_IRQ, R_IRQ_MASK, R_GPIO_IN_H, R_PC0, R_FLEVEL0, SM,
     CLKDIV_INT_L, CLKDIV_FRAC, WRAP_TOP, WRAP_BOTTOM, SHIFTCTRL, THRESH,
     PIN_OUT, PIN_SET, PIN_IN, PIN_SIDE, JMP_PIN,
-    AUTOPULL, AUTOPUSH, OUT_RIGHT, SIDE_OPT, SIDE_PINDIR,
+    AUTOPULL, AUTOPUSH, OUT_RIGHT, IN_RIGHT, SIDE_OPT, SIDE_PINDIR,
     TXF, RXF, STATUS_CFG, STATUS_RX,
 )
 from golden import random_case
@@ -945,3 +945,56 @@ async def test_capture_replay(dut):
     assert got == wave[:len(got)], f"capture {got} != waveform {wave[:len(got)]}"
     dut._log.info(f"capture/replay: {len(samples)} samples, "
                   f"{len(got)} symbols reconstructed exactly")
+
+
+@cocotb.test()
+async def test_nec_ir_receive(dut):
+    """SM0 decodes NEC infrared (post-demodulator polarity) on GPIO8 by
+    measuring gap length: each bit is WAIT for burst, WAIT for burst end,
+    then one sample a fixed delay later - still inside the next burst for
+    a '0', still idle for a '1'. Referencing the sample to the burst end
+    makes the loop self-correcting for both bit lengths. The leader is
+    consumed without sampling, so exactly 32 bits autopush as 4 bytes.
+
+    NEC timing is scaled 20x (28.1 us unit instead of 562.5 us) purely to
+    keep the simulation short; every ratio is the real protocol's.
+    """
+    spi = await setup(dut)
+
+    prog = [
+        WAIT(0, W_PIN, 0),            # 0: leader burst
+        WAIT(1, W_PIN, 0),            # 1: leader gap begins
+        SET(SDST_X, 31),              # 2: 32 data bits
+        WAIT(0, W_PIN, 0),            # 3: bit burst
+        WAIT(1, W_PIN, 0, delay=20),  # 4: sample 42 us after burst end:
+                                      #    mid-burst for '0', mid-gap for '1'
+        IN_(SRC_PINS, 1),             # 5: high = long gap = '1'
+        JMP(3, C_XDEC),               # 6:
+        JMP(7),                       # 7: park
+    ]
+    await spi.load_program(0, prog)
+
+    await spi.write(SM(0) + CLKDIV_INT_L, 100)  # 2 us tick at the 20x scale
+    await spi.write(SM(0) + WRAP_TOP, 31)
+    await spi.write(SM(0) + WRAP_BOTTOM, 0)
+    await spi.write(SM(0) + SHIFTCTRL, AUTOPUSH | IN_RIGHT)  # LSB first
+    await spi.write(SM(0) + PIN_IN, 8)                       # GPIO8 = ui[3]
+    # idle the IR line high before enabling, or WAIT(0) fires on reset state
+    dut.ui_in.value = int(dut.ui_in.value) | (1 << 3)
+    await ClockCycles(dut.clk, 2)
+    await spi.write(R_CTRL, 0x11)
+
+    addr, cmd = 0x00, 0x2F
+    frame = [addr, addr ^ 0xFF, cmd, cmd ^ 0xFF]
+    await nec_transmit(dut, frame, unit_ns=28125)  # 562.5 us / 20
+
+    for _ in range(200):
+        if not (await spi.read(R_FSTAT, 1))[0] & 0x04:
+            break
+        await ClockCycles(dut.clk, 500)
+    got = []
+    for _ in range(4):
+        got += await spi.read(SM(0) + RXF, 1)
+    assert got == frame, f"NEC decode {got} != {frame}"
+    assert got[0] ^ got[1] == 0xFF and got[2] ^ got[3] == 0xFF
+    dut._log.info(f"NEC: address {got[0]:#04x} command {got[2]:#04x} OK")

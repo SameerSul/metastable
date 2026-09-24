@@ -56,7 +56,7 @@ verified UART demo on real silicon from the TT demo board's RP2040.
 cd test && make
 ```
 
-Verification has three legs: a directed cocotb suite with seven protocol
+Verification has three legs: a directed cocotb suite with eight protocol
 demos and ISA corner coverage, constrained-random co-simulation against a
 golden architectural model, and formal proofs.
 
@@ -83,6 +83,10 @@ The cocotb suite ([test/test.py](test/test.py)) covers:
 - **Concurrent protocols** — SM0 transmits the USB LS packet at 1.5 MHz
   while SM1 drives a WS2812 frame at 800 kHz, both decoders clean: two
   unrelated bit rates from one chip at once
+- **NEC infrared receive** — decodes address + command by measuring gap
+  length (WAIT for burst, WAIT for burst end, sample a fixed delay
+  later): a time-measuring receiver, the skill IR/1-Wire/DHT protocols
+  need
 - **Capture / replay** — SM1 replays an arbitrary 4-bit waveform from
   its FIFO while SM0 samples the same pins into a self-freezing
   16-sample snapshot: one chip as both ends of a logic analyzer

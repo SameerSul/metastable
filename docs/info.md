@@ -135,6 +135,10 @@ flow with the protocol demos:
 - **Concurrent protocols**: the USB LS packet at 1.5 MHz on one SM while
   the other drives WS2812 at 800 kHz - two unrelated bit rates at once,
   both decoder-checked.
+- **NEC infrared receive**: decodes a full frame (address, command and
+  their complements) by measuring gap lengths - each bit is WAIT for
+  burst, WAIT for burst end, one sample a fixed delay later, which
+  self-corrects for both bit lengths. Eight instructions.
 - **Capture / replay**: SM1 replays an arbitrary 4-bit waveform
   (`OUT PINS,4` from the FIFO) while SM0 samples the same pins
   (`IN PINS,4`, autopush) into a snapshot that freezes itself when the

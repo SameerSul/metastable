@@ -393,3 +393,29 @@ def ps2_frame_bytes(value):
     bits = [0] + [(value >> i) & 1 for i in range(8)] + [parity, 1]
     bits += [1] * 5  # pad the second byte with idle-high bits
     return [sum(bits[k + i] << i for i in range(8)) for k in (0, 8)]
+
+
+async def nec_transmit(dut, data_bytes, unit_ns, gpio_bit=3):
+    """Drive an NEC IR frame (demodulator polarity: idle high, burst low)
+    onto ui_in[gpio_bit]. unit_ns is the 562.5 us burst unit, scalable to
+    keep simulations short. Leader 16/8 units, bit = 1 unit burst + 1
+    ('0') or 3 ('1') units gap, then the stop burst."""
+    from cocotb.triggers import Timer
+
+    def drive(level):
+        v = int(dut.ui_in.value)
+        dut.ui_in.value = (v | (1 << gpio_bit)) if level else (v & ~(1 << gpio_bit))
+
+    async def pulse(low_units, high_units):
+        drive(0)
+        await Timer(round(low_units * unit_ns), unit="ns")
+        drive(1)
+        await Timer(round(high_units * unit_ns), unit="ns")
+
+    drive(1)
+    await Timer(20 * unit_ns, unit="ns")
+    await pulse(16, 8)  # leader
+    for b in data_bytes:
+        for i in range(8):  # LSB first
+            await pulse(1, 3 if (b >> i) & 1 else 1)
+    await pulse(1, 4)  # stop burst, then idle
