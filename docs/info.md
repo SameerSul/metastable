@@ -5,6 +5,8 @@ programmable state machines that bit-bang protocols (UART, SPI, I2C, and
 anything else that fits the timing) entirely in "firmware" loaded after
 fabrication.
 
+![Architecture](architecture.png)
+
 Each state machine executes one 16-bit instruction per divided-clock tick
 from a shared 32-entry instruction memory:
 
@@ -109,7 +111,7 @@ MicroPython; `sw/metastable_host.py` is a register-level host driver for
 the demo board's RP2040 (bit-banged mode-0 SPI over `ui[2:0]`/`uo[0]`),
 and `sw/examples/uart_loopback.py` runs the UART demo on silicon. The
 cocotb suite imports the same assembler; `test/test.py` shows the full
-flow with three protocol demos:
+flow with the protocol demos:
 
 - **UART loopback**: SM0 runs an 8N1 transmitter on GPIO0, SM1 a
   receiver on the same pin; bytes pushed into SM0's TX FIFO over SPI

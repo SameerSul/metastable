@@ -10,6 +10,8 @@ timing — entirely in firmware loaded over SPI after fabrication.
 
 Full datasheet: [docs/info.md](docs/info.md)
 
+![Architecture](docs/architecture.png)
+
 ## Architecture
 
 - 2 state machines, one 16-bit instruction per divided-clock tick, shared
@@ -100,10 +102,10 @@ cycles: zero cumulative drift, the property the USB bit clock rides on.
 
 [analysis/](analysis/README.md) audits the hardened layout with the proxy
 lenses from [VivaPlace](https://github.com/SameerSul/leetfm-macro-place-challenge-2026)
-(HPWL / density / RUDY congestion + connectivity-inferred hierarchy cohesion):
-22% utilization, congestion headroom everywhere, and a die-spanning scatter of
-SM1's cluster that the worst setup path (+0.34 ns @ slow corner) tracks
-end-to-end.
+(HPWL / density / RUDY congestion + connectivity-inferred hierarchy cohesion).
+The audit traced the worst setup path to a die-spanning scatter of SM1's
+cluster; a validated placement-density change recovered 4.3x slow-corner
+setup margin (+0.34 to +1.45 ns at 50 MHz).
 
 ## Resources
 
