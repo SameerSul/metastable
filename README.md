@@ -54,7 +54,7 @@ verified UART demo on real silicon from the TT demo board's RP2040.
 cd test && make
 ```
 
-Verification has three legs: a directed cocotb suite with six protocol
+Verification has three legs: a directed cocotb suite with seven protocol
 demos and ISA corner coverage, constrained-random co-simulation against a
 golden architectural model, and formal proofs.
 
@@ -75,6 +75,12 @@ The cocotb suite ([test/test.py](test/test.py)) covers:
   CRC16, EOP) on D+/D- at 1.5 MHz +0.03% via the fractional divider; an
   independent decoder model samples the bus at bit centers and checks
   every field plus the measured bit rate
+- **PS/2 device** — device-generated 12.5 kHz clock via side-set, 11-bit
+  frames (start, data, odd parity, stop) spanning two FIFO bytes with
+  mid-frame autopull; host model validates framing and the clock band
+- **Concurrent protocols** — SM0 transmits the USB LS packet at 1.5 MHz
+  while SM1 drives a WS2812 frame at 800 kHz, both decoders clean: two
+  unrelated bit rates from one chip at once
 - **ISA coverage** — MOV invert/reverse/STATUS/EXEC, inter-SM IRQ
   handshake + HOST_IRQ, JMP variants, computed jumps, FIFO thresholds and
   backpressure, fractional clock divider, restart semantics
@@ -83,10 +89,12 @@ The cocotb suite ([test/test.py](test/test.py)) covers:
   ([test/golden.py](test/golden.py)), comparing PC, IRQ flags, and exact
   RX FIFO contents, including stall-park points
 
-Formal ([formal/run.sh](formal/run.sh), CI job `formal`): the FIFO's
-structural invariants and in-order data integrity are proved unbounded
-with yosys-smtbmc (BMC + k-induction, properties in `pio_fifo.v` under
-`ifdef FORMAL`).
+Formal ([formal/run.sh](formal/run.sh), CI job `formal`, yosys-smtbmc
+BMC + k-induction, properties under `ifdef FORMAL`): the FIFO's
+structural invariants and in-order data integrity, and the clock
+divider's timing theorem — every tick-to-tick gap is exactly
+`div_int + carry`, so 256 ticks span exactly `256*div_int + div_frac`
+cycles: zero cumulative drift, the property the USB bit clock rides on.
 
 ## Physical design
 

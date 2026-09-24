@@ -127,12 +127,21 @@ flow with three protocol demos:
 - **USB low-speed TX**: a complete DATA0 packet on D+/D- at 1.5 MHz,
   decoded and field-checked by an independent bus model (see Protocol
   reach above).
+- **PS/2 device**: device-generated 12.5 kHz clock via side-set, 11-bit
+  frames with odd parity spanning two FIFO bytes (mid-frame autopull),
+  validated by a host model.
+- **Concurrent protocols**: the USB LS packet at 1.5 MHz on one SM while
+  the other drives WS2812 at 800 kHz - two unrelated bit rates at once,
+  both decoder-checked.
 
 Beyond the directed suite, seeded constrained-random programs run
 against a golden architectural model of the state machine
 (`test/golden.py`), comparing PC, IRQ flags and exact RX FIFO contents
-per seed; and the FIFO's structural invariants and in-order data
-integrity are formally proved (BMC + k-induction, `formal/run.sh`).
+per seed; and two blocks carry formal proofs (BMC + k-induction,
+`formal/run.sh`): the FIFO's structural invariants and in-order data
+integrity, and the clock divider's exact tick spacing (every gap is
+div_int + carry, so 256 ticks span exactly 256*div_int + div_frac
+cycles - the zero-drift property the USB LS bit clock relies on).
 
 On the dev board, wire the RP2040 (or any SPI master, clk >= 8x SCK) to
 `SPI_SCK/CS_N/MOSI` on `ui[2:0]` and `SPI_MISO` on `uo[0]`, then:

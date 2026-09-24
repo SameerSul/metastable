@@ -160,8 +160,9 @@ class WS2812Decoder:
 
     RESET_NS = 9000  # datasheet says >50 us; shortened to keep sims fast
 
-    def __init__(self, dut):
+    def __init__(self, dut, pin=0):
         self.dut = dut
+        self.pin = pin
         self.frames = []   # list of byte lists, one per latched frame
         self.bad_pulses = []
         self._bits = []
@@ -183,8 +184,8 @@ class WS2812Decoder:
         while True:
             await RisingEdge(dut.clk)
             try:
-                driven = int(dut.uio_oe.value) & 1
-                level = int(dut.uio_out.value) & driven
+                driven = (int(dut.uio_oe.value) >> self.pin) & 1
+                level = (int(dut.uio_out.value) >> self.pin) & driven
             except ValueError:
                 driven, level = 0, 0
             now = get_sim_time("ns")
@@ -333,3 +334,62 @@ class UsbLsDecoder:
             for k in range(0, len(bits) - len(bits) % 8, 8)
         ]
         return data, len(symbols), measured
+
+
+class Ps2Host:
+    """PS/2 host model: DATA = GPIO0, CLK = GPIO1 (device-driven).
+
+    Samples DATA on every falling CLK edge, validates the 11-bit frame
+    (start 0, 8 data bits LSB first, odd parity, stop 1), and records
+    the clock period. Undriven lines read high (pull-ups).
+    """
+
+    def __init__(self, dut):
+        self.dut = dut
+        self.bytes = []
+        self.errors = []
+        self.periods_ns = []
+        self._bits = []
+        self._t_fall = None
+
+    async def run(self):
+        from cocotb.utils import get_sim_time
+        dut = self.dut
+        prev_clk = 1
+        while True:
+            await RisingEdge(dut.clk)
+            try:
+                out = int(dut.uio_out.value)
+                oe = int(dut.uio_oe.value)
+            except ValueError:
+                out, oe = 0, 0
+            data = (out >> 0) & 1 if (oe >> 0) & 1 else 1
+            clkl = (out >> 1) & 1 if (oe >> 1) & 1 else 1
+            if prev_clk and not clkl:  # falling edge: sample
+                now = get_sim_time("ns")
+                if self._t_fall is not None:
+                    self.periods_ns.append(now - self._t_fall)
+                self._t_fall = now
+                self._bits.append(data)
+                if len(self._bits) == 11:
+                    b = self._bits
+                    val = sum(bit << i for i, bit in enumerate(b[1:9]))
+                    if b[0] != 0:
+                        self.errors.append("start bit high")
+                    elif (sum(b[1:10]) % 2) != 1:
+                        self.errors.append(f"parity error on {val:#x}")
+                    elif b[10] != 1:
+                        self.errors.append("stop bit low")
+                    else:
+                        self.bytes.append(val)
+                    self._bits = []
+            prev_clk = clkl
+
+
+def ps2_frame_bytes(value):
+    """Pack one PS/2 device frame (start, 8 data LSB first, odd parity,
+    stop) into two FIFO bytes for OUT PINS,1 shifting right."""
+    parity = 1 ^ (bin(value).count("1") & 1)
+    bits = [0] + [(value >> i) & 1 for i in range(8)] + [parity, 1]
+    bits += [1] * 5  # pad the second byte with idle-high bits
+    return [sum(bits[k + i] << i for i in range(8)) for k in (0, 8)]
