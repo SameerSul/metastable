@@ -8,7 +8,8 @@ from cocotb.triggers import ClockCycles
 
 from metastable import (
     SpiHost, uio_loopback, I2CSlave, WS2812Decoder, UsbLsDecoder,
-    usb_ls_packet_symbols, usb_symbols_to_bytes, usb_crc16, side,
+    usb_ls_packet_symbols, usb_symbols_to_bytes, usb_crc16,
+    Ps2Host, ps2_frame_bytes, side,
     JMP, WAIT, IN_, OUT, PUSH, PULL, MOV, IRQ, SET,
     SRC_PINS, SRC_X, SRC_Y, SRC_NULL, SRC_STATUS, SRC_OSR,
     ODST_PINS, ODST_X, ODST_NULL, ODST_PINDIRS, ODST_PC, ODST_ISR,
@@ -738,3 +739,132 @@ async def test_random_cosim(dut):
         dut._log.info(
             f"cosim seed {used_seed}: {steps} steps, pc={pc}, "
             f"rx={len(rx)} bytes, irq={irq:#x} OK")
+
+
+@cocotb.test()
+async def test_concurrent_protocols(dut):
+    """Both SMs emulate different protocols at once: SM0 transmits a USB
+    low-speed packet on GPIO0/1 (1.5 MHz, divider 4+43/256) while SM1
+    drives a WS2812 frame on GPIO4 (800 kHz, divider 6+64/256). Each
+    stream is checked by its own independent decoder model — the point
+    is two unrelated bit rates from one chip at the same time.
+    """
+    spi = await setup(dut)
+    usb = UsbLsDecoder(dut)
+    led = WS2812Decoder(dut, pin=4)
+    cocotb.start_soon(usb.run())
+    cocotb.start_soon(led.run())
+
+    S0, S1 = side(0, 1), side(1, 1)
+    usb_prog = [
+        SET(SDST_PINS, 2),               # 0: idle J
+        SET(SDST_PINDIRS, 3),            # 1: drive D+/D-
+        OUT(ODST_PINS, 2, delay=6),      # 2: one symbol per 8 ticks
+        JMP(2),                          # 3:
+    ]
+    WS0 = 8
+    ws_prog = [
+        SET(SDST_PINDIRS, 1),                    # 8: GPIO4 output
+        OUT(ODST_X, 1, delay=2, side=S0),        # 9: bitloop
+        JMP(12, C_NOTX, delay=2, side=S1),       # 10:
+        JMP(9, delay=3, side=S1),                # 11: '1'
+        SET(SDST_PINDIRS, 1, delay=1, side=S0),  # 12: '0'
+        JMP(9, delay=1, side=S0),                # 13:
+    ]
+    await spi.load_program(0, usb_prog)
+    await spi.load_program(WS0, ws_prog)
+
+    # SM0: USB LS on GPIO0/1
+    await spi.write(SM(0) + CLKDIV_INT_L, 4)
+    await spi.write(SM(0) + CLKDIV_FRAC, 43)
+    await spi.write(SM(0) + WRAP_TOP, 7)
+    await spi.write(SM(0) + WRAP_BOTTOM, 0)
+    await spi.write(SM(0) + SHIFTCTRL, AUTOPULL | OUT_RIGHT)
+    await spi.write(SM(0) + PIN_SET, 0x20)
+    await spi.write(SM(0) + PIN_OUT, 0x20)
+
+    # SM1: WS2812 on GPIO4
+    await spi.write(SM(1) + CLKDIV_INT_L, 6)
+    await spi.write(SM(1) + CLKDIV_FRAC, 64)
+    await spi.write(SM(1) + WRAP_TOP, 31)
+    await spi.write(SM(1) + WRAP_BOTTOM, WS0)
+    await spi.write(SM(1) + SHIFTCTRL, AUTOPULL)
+    await spi.write(SM(1) + PIN_SET, 0x14)   # base 4, count 1
+    await spi.write(SM(1) + PIN_SIDE, 0x14)  # base 4, count 1
+
+    payload = [0x0F, 0x99]
+    pid = 0xC3
+    stream = usb_symbols_to_bytes(usb_ls_packet_symbols(pid, payload))
+    grb = [0x10, 0xFF, 0x08, 0x00, 0x40, 0xC3]  # two LEDs
+
+    # WS2812 frame fits the 8-deep FIFO: preload it whole, then start
+    # both SMs together and stream the USB symbols live
+    await spi.write(R_CTRL, 0x30)  # both held in reset at wrap_bottom
+    await spi.write(SM(1) + TXF, grb)
+    await spi.write(SM(0) + TXF, stream[:8])
+    await spi.write(R_CTRL, 0x03)  # both enabled, no restart
+    fast = SpiHost(dut, half=4)
+    for b in stream[8:]:
+        await fast.write(SM(0) + TXF, b)
+
+    await ClockCycles(dut.clk, 5500)
+
+    data, wire_bits, bit_ns = usb.decode()
+    crc = usb_crc16(payload)
+    assert data == [pid] + payload + [crc & 0xFF, (crc >> 8) & 0xFF], \
+        f"USB side broke under concurrency: {data}"
+    assert not led.bad_pulses, f"WS2812 pulses out of spec: {led.bad_pulses}"
+    assert led.frames and led.frames[0] == grb, \
+        f"WS2812 side broke under concurrency: {led.frames}"
+    dut._log.info(
+        f"concurrent: USB {len(data)} bytes @ {bit_ns:.1f} ns/bit + "
+        f"WS2812 {len(led.frames[0])} bytes, both clean")
+
+
+@cocotb.test()
+async def test_ps2_device(dut):
+    """SM0 is a PS/2 device transmitter: DATA on GPIO0, device-generated
+    CLK on GPIO1 via side-set, 12.5 kHz (divider 250, 16 ticks per bit).
+    Each 11-bit frame (start, 8 data LSB first, odd parity, stop) spans
+    two FIFO bytes with autopull refilling mid-frame. A host model
+    samples DATA on falling CLK edges and validates framing, parity and
+    the 10-16.7 kHz clock band.
+    """
+    spi = await setup(dut)
+    host = Ps2Host(dut)
+    cocotb.start_soon(host.run())
+
+    H, L = side(1, 1), side(0, 1)
+    prog = [
+        SET(SDST_PINDIRS, 3, side=H),        # 0: DATA + CLK outputs
+        SET(SDST_PINS, 3, side=H),           # 1: idle high
+        PULL(block=1, side=H),               # 2: wait for a frame
+        SET(SDST_X, 10, side=H),             # 3: 11 bits
+        OUT(ODST_PINS, 1, delay=7, side=H),  # 4: data setup, CLK high
+        JMP(4, C_XDEC, delay=7, side=L),     # 5: CLK low, host samples
+        JMP(2, side=H),                      # 6: frame done, CLK high
+    ]
+    await spi.load_program(0, prog)
+
+    await spi.write(SM(0) + CLKDIV_INT_L, 250)  # 5 us tick, 80 us/bit
+    await spi.write(SM(0) + WRAP_TOP, 31)
+    await spi.write(SM(0) + WRAP_BOTTOM, 0)
+    await spi.write(SM(0) + SHIFTCTRL, AUTOPULL | OUT_RIGHT)
+    await spi.write(SM(0) + PIN_OUT, 0x10)   # DATA: base 0, count 1
+    await spi.write(SM(0) + PIN_SET, 0x20)   # base 0, count 2
+    await spi.write(SM(0) + PIN_SIDE, 0x11)  # CLK: base 1, count 1
+    await spi.write(R_CTRL, 0x11)
+
+    scancodes = [0x1C, 0xF0]  # 'A' make, break prefix
+    for code in scancodes:
+        await spi.write(SM(0) + TXF, ps2_frame_bytes(code))
+
+    # 2 frames x 11 bits x 80 us = 1.76 ms
+    await ClockCycles(dut.clk, 100000)
+
+    assert not host.errors, f"PS/2 framing errors: {host.errors}"
+    assert host.bytes == scancodes, f"PS/2 {host.bytes} != {scancodes}"
+    period = sum(host.periods_ns[:10]) / 10
+    freq = 1e9 / period
+    dut._log.info(f"PS/2 clock {freq/1e3:.2f} kHz")
+    assert 10e3 <= freq <= 16.7e3, f"PS/2 clock {freq} Hz out of band"
