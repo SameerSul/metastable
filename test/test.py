@@ -7,7 +7,7 @@ from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles
 
 from metastable import (
-    SpiHost, uio_loopback, I2CSlave, WS2812Decoder, UsbLsDecoder,
+    SPI_HALF, SpiHost, uio_loopback, I2CSlave, WS2812Decoder, UsbLsDecoder,
     usb_ls_packet_symbols, usb_symbols_to_bytes, usb_crc16,
     Ps2Host, ps2_frame_bytes, nec_transmit, side,
     JMP, WAIT, IN_, OUT, PUSH, PULL, MOV, IRQ, SET,
@@ -1004,3 +1004,78 @@ async def test_nec_ir_receive(dut):
     assert got == frame, f"NEC decode {got} != {frame}"
     assert got[0] ^ got[1] == 0xFF and got[2] ^ got[3] == 0xFF
     dut._log.info(f"NEC: address {got[0]:#04x} command {got[2]:#04x} OK")
+
+
+@cocotb.test()
+async def test_spi_fuzz(dut):
+    """Host-interface fuzz: random read/write bursts against instruction
+    memory (side-effect-free RAM) interleaved with transfers aborted by
+    CS_N mid-byte at random bit offsets. Semantics under test: only
+    fully clocked bytes commit, partial bytes vanish, the address
+    auto-increments per completed data byte, and an abort never corrupts
+    state for the next transaction.
+    """
+    import random as _random
+    spi = await setup(dut)
+    rng = _random.Random(2027)
+
+    async def clock_bits(byte_list, nbits):
+        """Clock exactly nbits of byte_list under one CS, then abort."""
+        bits = []
+        for b in byte_list:
+            bits += [(b >> i) & 1 for i in range(7, -1, -1)]
+        spi._drive(0, 0, 0)
+        await ClockCycles(dut.clk, SPI_HALF)
+        for bit in bits[:nbits]:
+            spi._drive(0, 0, bit)
+            await ClockCycles(dut.clk, SPI_HALF)
+            spi._drive(1, 0, bit)
+            await ClockCycles(dut.clk, SPI_HALF)
+        spi._drive(0, 0, 0)
+        await ClockCycles(dut.clk, SPI_HALF)
+        spi._drive(0, 1, 0)
+        await ClockCycles(dut.clk, SPI_HALF)
+
+    model = {a: 0 for a in range(0x40)}  # imem bytes, reset to X-free zero
+    await spi.write(0x00, [0] * 0x40)    # make hardware match
+
+    for step in range(60):
+        kind = rng.random()
+        addr = rng.randrange(0x40)
+        if kind < 0.35:  # clean write burst
+            n = rng.randrange(1, 5)
+            data = [rng.randrange(256) for _ in range(n)]
+            await spi.write(addr, data)
+            for i, b in enumerate(data):
+                if addr + i < 0x40:
+                    model[addr + i] = b
+        elif kind < 0.60:  # clean read burst, checked
+            n = rng.randrange(1, 5)
+            got = await spi.read(addr, n)
+            exp = [model.get(addr + i, 0) for i in range(n)]
+            exp = [e if addr + i < 0x40 else e
+                   for i, e in enumerate(exp)]
+            if addr + n <= 0x40:
+                assert got == exp, f"step {step}: read {got} != {exp}"
+        else:  # aborted transfer at a random bit offset
+            n = rng.randrange(1, 4)
+            data = [rng.randrange(256) for _ in range(n)]
+            total_bits = 8 * (1 + n)
+            nbits = rng.randrange(1, total_bits)  # always cut short
+            write = rng.random() < 0.5
+            cmd = (0x80 | addr) if write else addr
+            await clock_bits([cmd] + data, nbits)
+            if write:
+                done = nbits // 8  # completed bytes incl. command
+                for i in range(max(0, done - 1)):
+                    if addr + i < 0x40:
+                        model[addr + i] = data[i]
+            # aborted reads have no architectural effect on imem
+
+    got = await spi.read(0x00, 0x40)
+    exp = [model[a] for a in range(0x40)]
+    assert got == exp, (
+        "post-fuzz imem mismatch at "
+        f"{[hex(a) for a in range(0x40) if got[a] != exp[a]]}")
+    dut._log.info("SPI fuzz: 60 transactions incl. mid-byte aborts, "
+                  "imem state matches the reference model exactly")

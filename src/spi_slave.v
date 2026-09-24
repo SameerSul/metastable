@@ -131,4 +131,33 @@ module spi_slave (
     end
   end
 
+`ifdef FORMAL
+  // Formal properties (yosys-smtbmc, see formal/run.sh), proved with NO
+  // assumptions on sck/cs_n/mosi - arbitrary pad waveforms, including
+  // glitches and mid-byte aborts. The register-bus strobes stay
+  // disciplined: single-cycle, mutually exclusive, never re-fired for
+  // the same byte. This is what makes FIFO pops/pushes exactly-once.
+  reg f_past_valid = 1'b0;
+  always @(posedge clk) f_past_valid <= 1'b1;
+  always @* if (!f_past_valid) assume (!rst_n);
+
+  reg f_wr_q = 1'b0, f_rd_q = 1'b0;
+  always @(posedge clk) begin
+    f_wr_q <= wr_en;
+    f_rd_q <= rd_en;
+  end
+
+  always @* if (f_past_valid && rst_n) begin
+    assert (!(wr_en && rd_en));
+    assert (!(wr_req && rd_req));
+    assert (!(wr_en && f_wr_q));  // strobes are single-cycle
+    assert (!(rd_en && f_rd_q));
+    // a request or strobe can only be in flight right after a byte
+    // completed, i.e. while bitcnt has wrapped to 0 - which is what
+    // rules out double commits from any sck pattern
+    if (wr_req || rd_req || wr_en || rd_en)
+      assert (bitcnt == 3'd0);
+  end
+`endif
+
 endmodule

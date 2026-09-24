@@ -3,6 +3,8 @@
 #   pio_fifo:   structural invariants + in-order data integrity
 #   pio_clkdiv: exact tick spacing (div_int + accumulator carry), so 256
 #               ticks span exactly 256*div_int + div_frac cycles
+#   spi_slave:  register-bus strobe discipline under arbitrary pad
+#               waveforms (single-cycle, exclusive, exactly-once)
 # BMC catches any reachable violation up to 24 cycles; k-induction then
 # proves the properties for unbounded time.
 set -euo pipefail
@@ -11,7 +13,7 @@ cd "$(dirname "$0")/.."
 SOLVER="${SOLVER:-z3}"
 mkdir -p formal/out
 
-for top in pio_fifo pio_clkdiv; do
+for top in pio_fifo pio_clkdiv spi_slave; do
   echo "==== $top ===="
   yosys -q -p "
     read_verilog -formal -DFORMAL src/$top.v
