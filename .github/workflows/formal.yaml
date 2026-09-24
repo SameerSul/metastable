@@ -1,0 +1,18 @@
+name: formal
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  formal:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v6
+
+      - name: install oss-cad-suite (yosys, yosys-smtbmc, z3)
+        uses: YosysHQ/setup-oss-cad-suite@v3
+
+      - name: prove pio_fifo properties
+        run: ./formal/run.sh

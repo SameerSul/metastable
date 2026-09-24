@@ -1,4 +1,4 @@
-![](../../workflows/gds/badge.svg) ![](../../workflows/docs/badge.svg) ![](../../workflows/test/badge.svg) ![](../../workflows/fpga/badge.svg)
+![](../../workflows/gds/badge.svg) ![](../../workflows/docs/badge.svg) ![](../../workflows/test/badge.svg) ![](../../workflows/formal/badge.svg) ![](../../workflows/fpga/badge.svg)
 
 # Metastable: programmable protocol emulator
 
@@ -54,8 +54,11 @@ verified UART demo on real silicon from the TT demo board's RP2040.
 cd test && make
 ```
 
-Runs the cocotb suite ([test/test.py](test/test.py)): register/instruction
-memory read-write, three protocol demos, and ISA corner coverage:
+Verification has three legs: a directed cocotb suite with six protocol
+demos and ISA corner coverage, constrained-random co-simulation against a
+golden architectural model, and formal proofs.
+
+The cocotb suite ([test/test.py](test/test.py)) covers:
 
 - **UART loopback** — SM0 transmits 8N1 frames on GPIO0, SM1 receives them
   on the same pin through the pin router
@@ -68,9 +71,22 @@ memory read-write, three protocol demos, and ISA corner coverage:
 - **WS2812 / NeoPixel** — SM0 drives 800 kHz pulse-width-coded LED data
   (fractional divider at 8 MHz tick); a decoder model checks every pulse
   against the datasheet windows
+- **USB low-speed TX** — a real DATA0 packet (sync, NRZI, bit stuffing,
+  CRC16, EOP) on D+/D- at 1.5 MHz +0.03% via the fractional divider; an
+  independent decoder model samples the bus at bit centers and checks
+  every field plus the measured bit rate
 - **ISA coverage** — MOV invert/reverse/STATUS/EXEC, inter-SM IRQ
   handshake + HOST_IRQ, JMP variants, computed jumps, FIFO thresholds and
   backpressure, fractional clock divider, restart semantics
+- **Constrained-random cosim** — seeded random programs over the
+  architectural subset run against a golden Python model of the SM
+  ([test/golden.py](test/golden.py)), comparing PC, IRQ flags, and exact
+  RX FIFO contents, including stall-park points
+
+Formal ([formal/run.sh](formal/run.sh), CI job `formal`): the FIFO's
+structural invariants and in-order data integrity are proved unbounded
+with yosys-smtbmc (BMC + k-induction, properties in `pio_fifo.v` under
+`ifdef FORMAL`).
 
 ## Physical design
 

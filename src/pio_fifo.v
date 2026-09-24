@@ -50,4 +50,41 @@ module pio_fifo (
     end
   end
 
+`ifdef FORMAL
+  // Formal properties (yosys-smtbmc, see formal/run.sh): structural
+  // invariants proved by induction, plus a data-integrity proof via an
+  // arbitrary watched slot - whatever value was pushed into a slot is
+  // exactly what sits there (and is read out) while the slot is live.
+  reg f_past_valid = 1'b0;
+  always @(posedge clk) f_past_valid <= 1'b1;
+  always @* if (!f_past_valid) assume (!rst_n);
+
+  (* anyconst *) wire [2:0] f_slot;
+  wire [2:0] f_off = f_slot - rptr;
+  wire       f_occ = (count == 4'd8) || ({1'b0, f_off} < count);
+
+  reg [7:0] f_val;
+  reg       f_live = 1'b0;
+  always @(posedge clk) begin
+    if (!rst_n || flush) f_live <= 1'b0;
+    else if (do_push && wptr == f_slot) begin
+      f_val  <= wdata;
+      f_live <= 1'b1;
+    end else if (do_pop && rptr == f_slot) f_live <= 1'b0;
+  end
+
+  always @* begin
+    if (f_past_valid && rst_n) begin
+      assert (count <= 4'd8);
+      assert (full  == (count == 4'd8));
+      assert (empty == (count == 4'd0));
+      assert (wptr - rptr == count[2:0]);
+      if (f_live && f_occ) begin
+        assert (mem[f_slot] == f_val);
+        if (rptr == f_slot) assert (rdata == f_val);
+      end
+    end
+  end
+`endif
+
 endmodule

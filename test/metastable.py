@@ -23,8 +23,9 @@ SPI_HALF = 10  # clk cycles per half SCK period
 
 
 class SpiHost:
-    def __init__(self, dut):
+    def __init__(self, dut, half=SPI_HALF):
         self.dut = dut
+        self.half = half  # clk cycles per half SCK period (>= 4: clk >= 8x SCK)
         self._ui = 0x02  # CS_N high, SCK low
 
     def _drive(self, sck, cs_n, mosi):
@@ -35,22 +36,22 @@ class SpiHost:
         dut = self.dut
         rx = []
         self._drive(0, 0, 0)
-        await ClockCycles(dut.clk, SPI_HALF)
+        await ClockCycles(dut.clk, self.half)
         for b in tx_bytes:
             r = 0
             for i in range(7, -1, -1):
                 self._drive(0, 0, (b >> i) & 1)
-                await ClockCycles(dut.clk, SPI_HALF)
+                await ClockCycles(dut.clk, self.half)
                 # sample MISO only (other uo bits may be X, e.g. unwritten imem)
                 miso = dut.uo_out.value.binstr[-1]
                 r = (r << 1) | (1 if miso == "1" else 0)
                 self._drive(1, 0, (b >> i) & 1)
-                await ClockCycles(dut.clk, SPI_HALF)
+                await ClockCycles(dut.clk, self.half)
             rx.append(r)
         self._drive(0, 0, 0)
-        await ClockCycles(dut.clk, SPI_HALF)
+        await ClockCycles(dut.clk, self.half)
         self._drive(0, 1, 0)
-        await ClockCycles(dut.clk, SPI_HALF)
+        await ClockCycles(dut.clk, self.half)
         return rx
 
     async def write(self, addr, data):
@@ -203,3 +204,132 @@ class WS2812Decoder:
                 self._cut()
                 t_fall = None
             prev = level
+
+
+# ---------------------------------------------------------------------------
+# USB low-speed helpers: host-side symbol encoder + bus decoder model
+# ---------------------------------------------------------------------------
+# Low-speed signalling: J = D- high / D+ low, K = D+ high / D- low,
+# SE0 = both low. With D+ on GPIO0 and D- on GPIO1, OUT PINS,2 takes the
+# symbol as {D-, D+}: J = 0b10, K = 0b01, SE0 = 0b00.
+
+USB_J, USB_K, USB_SE0 = 0b10, 0b01, 0b00
+
+
+def usb_crc16(data):
+    """CRC16-USB (poly 0x8005 reflected, init 0xFFFF), complemented."""
+    crc = 0xFFFF
+    for b in data:
+        for i in range(8):
+            if (crc ^ (b >> i)) & 1:
+                crc = (crc >> 1) ^ 0xA001
+            else:
+                crc >>= 1
+    return (~crc) & 0xFFFF
+
+
+def usb_ls_packet_symbols(pid, payload):
+    """Build one LS packet as a J/K/SE0 symbol list: sync + PID (+ data +
+    CRC16) with NRZI encoding ('0' toggles, '1' holds) and bit stuffing
+    (a 0 forced after six 1s), then the SE0/SE0/J EOP."""
+    packet = [pid] + list(payload)
+    if payload:
+        crc = usb_crc16(payload)
+        packet += [crc & 0xFF, (crc >> 8) & 0xFF]
+    bits = [0, 0, 0, 0, 0, 0, 0, 1]  # sync byte 0x80, LSB first
+    for b in packet:
+        bits += [(b >> i) & 1 for i in range(8)]
+    stuffed, ones = [], 0
+    for bit in bits:
+        stuffed.append(bit)
+        ones = ones + 1 if bit else 0
+        if ones == 6:
+            stuffed.append(0)
+            ones = 0
+    symbols, state = [], USB_J  # bus idles at J
+    for bit in stuffed:
+        if not bit:
+            state = USB_K if state == USB_J else USB_J
+        symbols.append(state)
+    return symbols + [USB_SE0, USB_SE0, USB_J]
+
+
+def usb_symbols_to_bytes(symbols, lead_idle=8):
+    """Pack symbols 4 per FIFO byte for OUT PINS,2 shifting right, with a
+    leading idle-J run and the final byte padded with idle J."""
+    syms = [USB_J] * lead_idle + list(symbols)
+    while len(syms) % 4:
+        syms.append(USB_J)
+    return [
+        syms[i] | (syms[i + 1] << 2) | (syms[i + 2] << 4) | (syms[i + 3] << 6)
+        for i in range(0, len(syms), 4)
+    ]
+
+
+class UsbLsDecoder:
+    """Samples D+/D- (GPIO0/1) transitions and decodes one LS packet:
+    locks onto the first J->K edge, samples at bit centers, NRZI-decodes,
+    destuffs, and splits sync/packet/EOP. Also measures the bit rate."""
+
+    T_BIT_NS = 666.875  # 8 ticks x (4 + 43/256) x 20 ns
+
+    def __init__(self, dut):
+        self.dut = dut
+        self.edges = []  # (time_ns, {D-,D+} symbol)
+
+    async def run(self):
+        from cocotb.utils import get_sim_time
+        dut = self.dut
+        prev = None
+        while True:
+            await RisingEdge(dut.clk)
+            try:
+                out = int(dut.uio_out.value)
+                oe = int(dut.uio_oe.value)
+            except ValueError:
+                out, oe = 0, 0
+            sym = out & oe & 3
+            if sym != prev:
+                self.edges.append((get_sim_time("ns"), sym))
+                prev = sym
+
+    def decode(self):
+        """Returns (packet_bytes, n_wire_bits, measured_bit_ns) or raises."""
+        start = next(t for t, s in self.edges if s == USB_K)  # sync KJKJ...
+        def sample(n):
+            t = start + (n + 0.5) * self.T_BIT_NS
+            sym = USB_J
+            for et, es in self.edges:
+                if et <= t:
+                    sym = es
+                else:
+                    break
+            return sym
+        symbols, n = [], 0
+        while True:
+            s = sample(n)
+            if s == USB_SE0:
+                break
+            symbols.append(s)
+            n += 1
+            assert n < 4000, "no EOP found"
+        assert sample(n + 1) == USB_SE0 and sample(n + 2) == USB_J, "bad EOP"
+        eop_edge = next(t for t, s in self.edges if t > start and s == USB_SE0)
+        measured = (eop_edge - start) / len(symbols)
+        bits, state, ones = [], USB_J, 0
+        for s in symbols:
+            bit = 1 if s == state else 0
+            state = s
+            if ones == 6:  # stuffed bit: must be a 0, drop it
+                assert bit == 0, "missing stuff bit"
+                ones = 0
+                continue
+            ones = ones + 1 if bit else 0
+            bits.append(bit)
+        assert bits[:8] == [0, 0, 0, 0, 0, 0, 0, 1], f"bad sync {bits[:8]}"
+        bits = bits[8:]
+        data = [
+            sum(bits[k + i] << i for i in range(8))
+            for k in range(0, len(bits) - len(bits) % 8, 8)
+        ]
+        return data, len(symbols), measured
