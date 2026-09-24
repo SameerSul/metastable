@@ -90,16 +90,17 @@ so at 50 MHz / div 1 the ceiling is ~6 Mb/s Manchester — 10BASE-T's
 20 Mbaud is out of reach, but 10BASE-T link pulses (100 us spacing) and
 arbitrary sub-6 Mb/s Manchester links are emulatable.
 
-**USB low-speed (1.5 Mb/s)** analysis: the fractional divider hits the
-bit clock within USB's tolerance (div 4+43/256 = 8 ticks/bit, +0.03%).
-TX is feasible today: drive D+/D- as a 2-bit symbol stream (J, K, SE0)
-via `OUT PINS, 2` — the host pre-computes sync, NRZI, bit stuffing, CRC
-and EOP, packing 4 symbols per FIFO byte. Consumption is 2.67 us per
-FIFO byte vs ~1.3 us per byte for burst SPI writes at SCK = clk/8, so
-the 8-deep FIFO never underruns. RX is not practical beyond short
-captures: NRZI decode + bit unstuffing exceeds the two-SM instruction
-budget, and a raw 4x-oversampled dump (6 MS/s x 2 pins) exceeds the SPI
-drain rate.
+**USB low-speed (1.5 Mb/s) TX is demonstrated in the test suite**: the
+fractional divider hits the bit clock at +0.03% (div 4+43/256 = 8
+ticks/bit; measured +299 ppm against a +-1.5% budget), and the SM drives
+D+/D- as a 2-bit symbol stream (J, K, SE0) via `OUT PINS, 2` — the host
+pre-computes sync, NRZI, bit stuffing, CRC16 and EOP, packing 4 symbols
+per FIFO byte. Consumption is 2.67 us per FIFO byte vs ~1.3 us per byte
+for SPI writes at SCK = clk/8, so the 8-deep FIFO never underruns
+mid-packet; an independent decoder model checks every field of a DATA0
+packet on the wires. RX is not practical beyond short captures: NRZI
+decode + bit unstuffing exceeds the two-SM instruction budget, and a
+raw 4x-oversampled dump (6 MS/s x 2 pins) exceeds the SPI drain rate.
 
 ## How to test
 
@@ -123,6 +124,15 @@ flow with three protocol demos:
   (8 MHz fractional tick, 10 ticks/bit); every pulse is checked against
   the WS2812B datasheet windows and the GRB frame reassembled.
   `sw/examples/ws2812.py` runs it on silicon.
+- **USB low-speed TX**: a complete DATA0 packet on D+/D- at 1.5 MHz,
+  decoded and field-checked by an independent bus model (see Protocol
+  reach above).
+
+Beyond the directed suite, seeded constrained-random programs run
+against a golden architectural model of the state machine
+(`test/golden.py`), comparing PC, IRQ flags and exact RX FIFO contents
+per seed; and the FIFO's structural invariants and in-order data
+integrity are formally proved (BMC + k-induction, `formal/run.sh`).
 
 On the dev board, wire the RP2040 (or any SPI master, clk >= 8x SCK) to
 `SPI_SCK/CS_N/MOSI` on `ui[2:0]` and `SPI_MISO` on `uo[0]`, then:

@@ -7,7 +7,8 @@ from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles
 
 from metastable import (
-    SpiHost, uio_loopback, I2CSlave, WS2812Decoder, side,
+    SpiHost, uio_loopback, I2CSlave, WS2812Decoder, UsbLsDecoder,
+    usb_ls_packet_symbols, usb_symbols_to_bytes, usb_crc16, side,
     JMP, WAIT, IN_, OUT, PUSH, PULL, MOV, IRQ, SET,
     SRC_PINS, SRC_X, SRC_Y, SRC_NULL, SRC_STATUS, SRC_OSR,
     ODST_PINS, ODST_X, ODST_NULL, ODST_PINDIRS, ODST_PC, ODST_ISR,
@@ -17,9 +18,10 @@ from metastable import (
     R_CTRL, R_FSTAT, R_IRQ, R_IRQ_MASK, R_GPIO_IN_H, R_PC0, R_FLEVEL0, SM,
     CLKDIV_INT_L, CLKDIV_FRAC, WRAP_TOP, WRAP_BOTTOM, SHIFTCTRL, THRESH,
     PIN_OUT, PIN_SET, PIN_IN, PIN_SIDE, JMP_PIN,
-    AUTOPULL, AUTOPUSH, SIDE_OPT, SIDE_PINDIR,
+    AUTOPULL, AUTOPUSH, OUT_RIGHT, SIDE_OPT, SIDE_PINDIR,
     TXF, RXF, STATUS_CFG, STATUS_RX,
 )
+from golden import random_case
 
 
 async def setup(dut):
@@ -631,3 +633,108 @@ async def test_ws2812(dut):
     assert not dec.bad_pulses, f"out-of-spec pulses (ns): {dec.bad_pulses}"
     assert dec.frames, "no frame latched"
     assert dec.frames[0] == payload, f"WS2812 {dec.frames[0]} != {payload}"
+
+
+@cocotb.test()
+async def test_usb_ls_tx(dut):
+    """SM0 transmits a USB low-speed DATA0 packet on D+/D- (GPIO0/1).
+
+    Divider 4+43/256 gives 8 ticks per bit at 1.5 MHz +0.03%. The host
+    pre-computes sync, NRZI, bit stuffing, CRC16 and EOP, packing four
+    J/K/SE0 symbols per FIFO byte; the SM is just OUT PINS,2 every bit.
+    Streaming over SPI at SCK = clk/8 outruns the 2.67 us/byte line
+    consumption, so the 8-deep FIFO never underruns mid-packet. An
+    independent decoder model samples the bus at bit centers, NRZI
+    decodes, destuffs, and checks sync, PID, payload, CRC and EOP.
+    """
+    spi = await setup(dut)
+    dec = UsbLsDecoder(dut)
+    cocotb.start_soon(dec.run())
+
+    prog = [
+        SET(SDST_PINS, 2),               # 0: idle J (D- high, D+ low)
+        SET(SDST_PINDIRS, 3),            # 1: drive both lines
+        OUT(ODST_PINS, 2, delay=6),      # 2: one symbol per 8 ticks
+        JMP(2),                          # 3:
+    ]
+    await spi.load_program(0, prog)
+
+    await spi.write(SM(0) + CLKDIV_INT_L, 4)
+    await spi.write(SM(0) + CLKDIV_FRAC, 43)          # 1.5 MHz bit clock
+    await spi.write(SM(0) + WRAP_TOP, 31)
+    await spi.write(SM(0) + WRAP_BOTTOM, 0)
+    await spi.write(SM(0) + SHIFTCTRL, AUTOPULL | OUT_RIGHT)
+    await spi.write(SM(0) + PIN_SET, 0x20)            # base 0, count 2
+    await spi.write(SM(0) + PIN_OUT, 0x20)            # base 0, count 2
+    await spi.write(R_CTRL, 0x11)
+
+    payload = [0xFF, 0x3F, 0x00, 0xA5]  # 0xFF forces a stuffed bit
+    pid = 0xC3                          # DATA0
+    stream = usb_symbols_to_bytes(usb_ls_packet_symbols(pid, payload))
+
+    # burst-fill the FIFO, then stream the rest at SCK = clk/8: one
+    # 2-byte write is ~140 clk vs 133 clk consumed per symbol byte
+    fast = SpiHost(dut, half=4)
+    await fast.write(SM(0) + TXF, stream[:8])
+    for b in stream[8:]:
+        await fast.write(SM(0) + TXF, b)
+
+    await ClockCycles(dut.clk, 3000)  # drain + EOP + idle
+
+    data, wire_bits, bit_ns = dec.decode()
+    crc = usb_crc16(payload)
+    exp = [pid] + payload + [crc & 0xFF, (crc >> 8) & 0xFF]
+    assert data == exp, f"USB LS packet {data} != {exp}"
+    assert wire_bits > 8 + 8 * len(exp), "bit stuffing never happened"
+    ppm = (bit_ns / (1e9 / 1.5e6) - 1) * 1e6
+    dut._log.info(f"USB LS bit period {bit_ns:.1f} ns ({ppm:+.0f} ppm)")
+    assert abs(ppm) < 15000, f"bit rate {ppm:+.0f} ppm outside USB LS +-1.5%"
+
+
+@cocotb.test()
+async def test_random_cosim(dut):
+    """Constrained-random ISA verification against a golden model.
+
+    Each seed generates a random program over the architectural subset
+    (shifts, FIFOs, scratch ops, flow control, IRQ flags) plus random
+    SHIFTCTRL/THRESH/STATUS_CFG and a random TX FIFO preload, runs it to
+    its park point in both the golden model (test/golden.py) and the
+    silicon RTL, then compares PC, IRQ flags, and the exact RX FIFO
+    contents (which fold in X/Y through the dump epilogue).
+    """
+    spi = await setup(dut)
+    for seed in range(12):
+        prog, cfg, tx, g, steps, used_seed = random_case(seed)
+
+        # halt SM0 and reset its state; restart also flushes the FIFOs
+        await spi.write(SM(0) + WRAP_BOTTOM, 0)
+        await spi.write(SM(0) + WRAP_TOP, 31)
+        await spi.write(R_CTRL, 0x10)
+        await spi.load_program(0, prog)
+        await spi.write(SM(0) + CLKDIV_INT_L, 1)
+        await spi.write(SM(0) + CLKDIV_FRAC, 0)
+        await spi.write(SM(0) + SHIFTCTRL, cfg["shiftctrl"])
+        await spi.write(SM(0) + THRESH, cfg["thresh"])
+        await spi.write(SM(0) + STATUS_CFG, cfg["status_cfg"])
+        if tx:
+            await spi.write(SM(0) + TXF, tx)  # preload, then enable w/o restart
+        await spi.write(R_CTRL, 0x01)
+
+        await ClockCycles(dut.clk, 2200)  # bounded: model parked < 2000 steps
+
+        # freeze before inspecting: draining RX could unstall a blocked PUSH
+        await spi.write(R_CTRL, 0x00)
+        pc = (await spi.read(R_PC0, 1))[0]
+        irq = (await spi.read(R_IRQ, 1))[0]
+        rx = []
+        while len(rx) <= 8 and not (await spi.read(R_FSTAT, 1))[0] & 0x04:
+            rx += await spi.read(SM(0) + RXF, 1)
+
+        exp_irq = sum(b << i for i, b in enumerate(g.irq))
+        assert pc == g.pc, f"seed {used_seed}: PC {pc} != {g.pc}"
+        assert rx == g.rx, f"seed {used_seed}: RX {rx} != {g.rx}"
+        assert irq == exp_irq, f"seed {used_seed}: IRQ {irq:#x} != {exp_irq:#x}"
+        await spi.write(R_IRQ, 0x0F)  # W1C for the next seed
+        dut._log.info(
+            f"cosim seed {used_seed}: {steps} steps, pc={pc}, "
+            f"rx={len(rx)} bytes, irq={irq:#x} OK")
