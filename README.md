@@ -10,6 +10,14 @@ timing — entirely in firmware loaded over SPI after fabrication.
 
 Full datasheet: [docs/info.md](docs/info.md)
 
+| | |
+|---|---|
+| Protocols demonstrated | UART, SPI, I2C, Manchester, WS2812, USB LS (1.5 MHz, +299 ppm), PS/2, NEC IR — plus capture/replay and two protocols concurrently |
+| Verification | 17 cocotb tests (independent bus/decoder models), constrained-random cosim vs a golden model, formal proofs on 2 blocks (BMC + k-induction) |
+| Timing theorem | proved: 256 divider ticks span exactly `256*div_int + div_frac` cycles — zero cumulative drift |
+| Implementation | 6x4 tiles, 22% util, +1.45 ns setup @ slow corner after a placement audit recovered 4.3x margin, ~4.7 mW |
+| Host software | MicroPython assembler + driver + examples for the TT demo board |
+
 ![Architecture](docs/architecture.png)
 
 ## Architecture
