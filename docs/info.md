@@ -166,11 +166,16 @@ flow with the protocol demos:
 Beyond the directed suite, seeded constrained-random programs run
 against a golden architectural model of the state machine
 (`test/golden.py`), comparing PC, IRQ flags and exact RX FIFO contents
-per seed; and two blocks carry formal proofs (BMC + k-induction,
-`formal/run.sh`): the FIFO's structural invariants and in-order data
-integrity, and the clock divider's exact tick spacing (every gap is
-div_int + carry, so 256 ticks span exactly 256*div_int + div_frac
-cycles - the zero-drift property the USB LS bit clock relies on).
+per seed; the SPI host interface is fuzzed with random bursts and
+mid-byte CS_N aborts against a reference model; and three blocks carry
+formal proofs (BMC + k-induction, `formal/run.sh`): the FIFO's
+structural invariants and in-order data integrity, the clock divider's
+exact tick spacing (every gap is div_int + carry, so 256 ticks span
+exactly 256*div_int + div_frac cycles - the zero-drift property the USB
+LS bit clock relies on), and the SPI slave's strobe discipline under
+arbitrary pad waveforms (single-cycle, exclusive, exactly-once - what
+makes FIFO pops over SPI exactly-once even through glitches and
+aborts).
 
 On the dev board, wire the RP2040 (or any SPI master, clk >= 8x SCK) to
 `SPI_SCK/CS_N/MOSI` on `ui[2:0]` and `SPI_MISO` on `uo[0]`, then:
