@@ -135,6 +135,11 @@ flow with the protocol demos:
 - **Concurrent protocols**: the USB LS packet at 1.5 MHz on one SM while
   the other drives WS2812 at 800 kHz - two unrelated bit rates at once,
   both decoder-checked.
+- **Capture / replay**: SM1 replays an arbitrary 4-bit waveform
+  (`OUT PINS,4` from the FIFO) while SM0 samples the same pins
+  (`IN PINS,4`, autopush) into a snapshot that freezes itself when the
+  RX FIFO fills - logic-analyzer capture and arbitrary waveform
+  generation are two-instruction programs.
 
 Beyond the directed suite, seeded constrained-random programs run
 against a golden architectural model of the state machine
@@ -156,6 +161,18 @@ On the dev board, wire the RP2040 (or any SPI master, clk >= 8x SCK) to
 
 `uo[7]` outputs a clock heartbeat (clk/2^24) for bring-up, and
 `uo[6:5]` expose the SMs' stall state for debugging.
+
+## Implementation
+
+Hardened with LibreLane/OpenROAD on IHP CMOS5L (130 nm), 6x4 Tiny
+Tapeout tiles (1289 x 711 um), ~13.8k standard cells at 22% utilization.
+Timing at 50 MHz: +1.45 ns setup margin at the slow corner (1.08 V,
+125 C) and +0.13 ns hold at the fast corner, after a floorplan audit
+raised placement density (see `analysis/` in the repo: the audit, its
+method, and the 4.3x margin recovery it bought). Total power ~4.7 mW.
+Zero DRC violations; one 2x-over Metal3 antenna on a single buffer input
+is accepted and documented. The same RTL also builds as an ICE40UP5K
+FPGA bitstream for pre-silicon bring-up.
 
 ## External hardware
 

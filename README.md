@@ -83,6 +83,9 @@ The cocotb suite ([test/test.py](test/test.py)) covers:
 - **Concurrent protocols** — SM0 transmits the USB LS packet at 1.5 MHz
   while SM1 drives a WS2812 frame at 800 kHz, both decoders clean: two
   unrelated bit rates from one chip at once
+- **Capture / replay** — SM1 replays an arbitrary 4-bit waveform from
+  its FIFO while SM0 samples the same pins into a self-freezing
+  16-sample snapshot: one chip as both ends of a logic analyzer
 - **ISA coverage** — MOV invert/reverse/STATUS/EXEC, inter-SM IRQ
   handshake + HOST_IRQ, JMP variants, computed jumps, FIFO thresholds and
   backpressure, fractional clock divider, restart semantics

@@ -868,3 +868,80 @@ async def test_ps2_device(dut):
     freq = 1e9 / period
     dut._log.info(f"PS/2 clock {freq/1e3:.2f} kHz")
     assert 10e3 <= freq <= 16.7e3, f"PS/2 clock {freq} Hz out of band"
+
+
+@cocotb.test()
+async def test_capture_replay(dut):
+    """Waveform generator + logic analyzer: SM1 replays an arbitrary
+    4-bit waveform on GPIO4-7 from its TX FIFO (OUT PINS,4) while SM0
+    samples the same pins (IN PINS,4, autopush) at the same rate into
+    its RX FIFO. Capture freezes itself when the RX FIFO fills - a
+    16-sample snapshot - and the host reads the waveform back. One chip,
+    both ends of a logic analyzer.
+    """
+    spi = await setup(dut)
+    cocotb.start_soon(uio_loopback(dut))
+
+    # SM0: sampler, 2 ticks per sample
+    cap_prog = [
+        IN_(SRC_PINS, 4),  # 0
+        JMP(0),            # 1
+    ]
+    # SM1: waveform replayer, 2 ticks per symbol
+    AWG = 8
+    awg_prog = [
+        SET(SDST_PINDIRS, 0xF),  # 8: GPIO4-7 outputs
+        OUT(ODST_PINS, 4),       # 9
+        JMP(9),                  # 10
+    ]
+    await spi.load_program(0, cap_prog)
+    await spi.load_program(AWG, awg_prog)
+
+    for sm in (0, 1):
+        await spi.write(SM(sm) + CLKDIV_INT_L, 16)
+        await spi.write(SM(sm) + WRAP_TOP, 31)
+    await spi.write(SM(0) + WRAP_BOTTOM, 0)
+    await spi.write(SM(1) + WRAP_BOTTOM, AWG)
+    await spi.write(SM(0) + SHIFTCTRL, AUTOPUSH)  # 2 samples/byte, MSB first
+    await spi.write(SM(0) + PIN_IN, 4)
+    await spi.write(SM(1) + SHIFTCTRL, AUTOPULL)  # 2 symbols/byte, MSB first
+    await spi.write(SM(1) + PIN_OUT, 0x44)        # base 4, count 4
+    await spi.write(SM(1) + PIN_SET, 0x44)        # base 4, count 4
+
+    wave = [0x1, 0x3, 0x7, 0xF, 0xE, 0xC, 0x8, 0x0,
+            0x5, 0xA, 0x5, 0xA, 0x9, 0x6, 0x3, 0xC]
+    packed = [(wave[i] << 4) | wave[i + 1] for i in range(0, 16, 2)]
+
+    # preload the whole waveform (exactly one FIFO), then start both SMs
+    # in the same CTRL write so replay and capture run in lockstep
+    await spi.write(R_CTRL, 0x30)
+    await spi.write(SM(1) + TXF, packed)
+    await spi.write(R_CTRL, 0x03)
+
+    await ClockCycles(dut.clk, 1400)  # 16 samples x 32 clk + margin
+
+    fstat = (await spi.read(R_FSTAT, 1))[0]
+    assert fstat & 0x08, "capture FIFO never filled (snapshot not taken)"
+    raw = []
+    for _ in range(8):
+        raw += await spi.read(SM(0) + RXF, 1)
+    samples = []
+    for b in raw:
+        samples += [b >> 4, b & 0xF]
+
+    # constant pipeline lag (pin router + 2FF sync) plus start alignment:
+    # compare transition sequences instead of absolute sample indices
+    def dedup(seq):
+        out = [seq[0]]
+        for s in seq[1:]:
+            if s != out[-1]:
+                out.append(s)
+        return out
+
+    got = dedup(samples)
+    if got and got[0] == 0 and wave[0] != 0:
+        got = got[1:]  # pins idle low until the first replayed symbol
+    assert len(got) >= 12, f"too few transitions captured: {samples}"
+    assert got == wave[:len(got)], f"capture {got} != waveform {wave[:len(got)]}"
+    dut._log.info(f"capture/replay: {len(samples)} samples, "
+                  f"{len(got)} symbols reconstructed exactly")
