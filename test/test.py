@@ -1153,3 +1153,41 @@ async def test_random_cosim_pins(dut):
         dut._log.info(
             f"pin cosim seed {used_seed}: {steps} steps, pc={pc}, "
             f"rx={len(rx)}, gpio_in={gin:#06x} OK")
+
+
+@cocotb.test()
+async def test_out_only_pads(dut):
+    """GPIO13-15 map to the dedicated output pads uo[4:2]. Drive them
+    with SET PINS and check the pads themselves (the pin cosim only
+    checks the internal readback path), including hold-last-value.
+    """
+    spi = await setup(dut)
+    prog = [
+        SET(SDST_PINS, 0x5),   # 0: GPIO13=1, GPIO14=0, GPIO15=1
+        JMP(1),                # 1: park
+        SET(SDST_PINS, 0x2),   # 2: GPIO14=1, others low
+        JMP(3),                # 3: park
+    ]
+    await spi.load_program(0, prog)
+    await spi.write(SM(0) + CLKDIV_INT_L, 1)
+    await spi.write(SM(0) + WRAP_TOP, 31)
+    await spi.write(SM(0) + PIN_SET, 0x3D)  # base 13, count 3
+
+    await spi.write(SM(0) + WRAP_BOTTOM, 0)
+    await spi.write(R_CTRL, 0x11)
+    await ClockCycles(dut.clk, 20)
+    pads = (int(dut.uo_out.value) >> 2) & 0x7
+    assert pads == 0x5, f"uo[4:2] = {pads:#03b}, expected 0b101"
+
+    # restart into the second program; pads must follow, then hold
+    await spi.write(SM(0) + WRAP_BOTTOM, 2)
+    await spi.write(R_CTRL, 0x11)
+    await ClockCycles(dut.clk, 20)
+    pads = (int(dut.uo_out.value) >> 2) & 0x7
+    assert pads == 0x2, f"uo[4:2] = {pads:#03b}, expected 0b010"
+
+    await spi.write(R_CTRL, 0x00)  # disabled: pads hold last value
+    await ClockCycles(dut.clk, 20)
+    pads = (int(dut.uo_out.value) >> 2) & 0x7
+    assert pads == 0x2, f"pads did not hold after disable: {pads:#03b}"
+    dut._log.info("out-only pads uo[4:2] drive and hold verified")
