@@ -13,12 +13,12 @@
 import random
 
 from metastable_asm import (
-    JMP, IN_, OUT, PUSH, PULL, MOV, IRQ, SET,
-    SRC_X, SRC_Y, SRC_NULL, SRC_STATUS, SRC_ISR, SRC_OSR,
-    ODST_X, ODST_Y, ODST_NULL, ODST_ISR,
-    MDST_X, MDST_Y, MDST_ISR, MDST_OSR, M_COPY, M_INV, M_REV,
-    SDST_X, SDST_Y,
-    C_ALWAYS, C_NOTX, C_XDEC, C_NOTY, C_YDEC, C_XNEY, C_NOTOSRE,
+    JMP, IN_, OUT, PUSH, PULL, MOV, IRQ, SET, side,
+    SRC_PINS, SRC_X, SRC_Y, SRC_NULL, SRC_STATUS, SRC_ISR, SRC_OSR,
+    ODST_PINS, ODST_X, ODST_Y, ODST_NULL, ODST_PINDIRS, ODST_ISR,
+    MDST_PINS, MDST_X, MDST_Y, MDST_ISR, MDST_OSR, M_COPY, M_INV, M_REV,
+    SDST_PINS, SDST_X, SDST_Y, SDST_PINDIRS,
+    C_ALWAYS, C_NOTX, C_XDEC, C_NOTY, C_YDEC, C_XNEY, C_PIN, C_NOTOSRE,
 )
 
 
@@ -26,8 +26,24 @@ def _rev8(v):
     return int(f"{v & 0xFF:08b}"[::-1], 2)
 
 
+def _pin_mask(base, cnt):
+    m = 0
+    for i in range(min(cnt, 8)):
+        m |= 1 << ((base + i) % 16)
+    return m
+
+
+def _pin_spread(base, cnt, val):
+    v = 0
+    for i in range(min(cnt, 8)):
+        if (val >> i) & 1:
+            v |= 1 << ((base + i) % 16)
+    return v
+
+
 class GoldenSM:
-    def __init__(self, program, shiftctrl, thresh, status_cfg, tx_fifo):
+    def __init__(self, program, shiftctrl, thresh, status_cfg, tx_fifo,
+                 pin_cfg=None, pins=0, dirs=0):
         self.prog = program
         self.autopull = bool(shiftctrl & 1)
         self.autopush = bool(shiftctrl & 2)
@@ -44,6 +60,11 @@ class GoldenSM:
         self.isr_cnt = 0
         self.irq = [0, 0, 0, 0]
         self.parked = False  # permanently stalled
+        # pin model (single SM; GPIO0-7 looped back, 8-12 read 0,
+        # 13-15 read back the output latch). Persists across restarts.
+        self.pc_cfg = pin_cfg or {}
+        self.pins = pins
+        self.dirs = dirs
 
     # -- helpers matching the RTL scratch logic --------------------------
     def _osr_empty(self):
@@ -53,9 +74,48 @@ class GoldenSM:
         level = len(self.rx) if self.status_cfg & 0x10 else len(self.tx)
         return 0xFF if level < (self.status_cfg & 0xF) else 0x00
 
+    def _gpio_in(self):
+        v = 0
+        for p in range(8):        # bidirectional, pad loopback
+            if (self.dirs >> p) & (self.pins >> p) & 1:
+                v |= 1 << p
+        for p in range(13, 16):   # out-only, internal readback
+            if (self.pins >> p) & 1:
+                v |= 1 << p
+        return v                  # 8-12: input-only, undriven in cosim
+
+    def _pins_in8(self):
+        g = self._gpio_in()
+        base = self.pc_cfg.get("in_base", 0)
+        return sum(((g >> ((base + i) % 16)) & 1) << i for i in range(8))
+
+    def _write_pins(self, base, cnt, val):
+        m = _pin_mask(base, cnt)
+        self.pins = (self.pins & ~m) | _pin_spread(base, cnt, val)
+
+    def _write_dirs(self, base, cnt, val):
+        m = _pin_mask(base, cnt)
+        self.dirs = (self.dirs & ~m) | _pin_spread(base, cnt, val)
+
+    def _side(self, ci):
+        """(enabled, value) from the dss field, mirroring pio_sm."""
+        cnt = self.pc_cfg.get("side_count", 0)
+        if cnt == 0:
+            return False, 0
+        dss = (ci >> 8) & 0x1F
+        if self.pc_cfg.get("side_opt", 0):
+            return bool(dss & 0x10), (dss >> (4 - cnt)) & ((1 << cnt) - 1)
+        return True, (dss >> (5 - cnt)) & ((1 << cnt) - 1)
+
+    def _apply_side(self, ci):
+        en, val = self._side(ci)
+        if en:
+            self._write_pins(self.pc_cfg.get("side_base", 0),
+                             self.pc_cfg.get("side_count", 0), val)
+
     def _src(self, code):
-        return {SRC_X: self.x, SRC_Y: self.y, SRC_NULL: 0,
-                SRC_STATUS: self._status(), SRC_ISR: self.isr,
+        return {SRC_PINS: self._pins_in8(), SRC_X: self.x, SRC_Y: self.y,
+                SRC_NULL: 0, SRC_STATUS: self._status(), SRC_ISR: self.isr,
                 SRC_OSR: self.osr}[code]
 
     def step(self):
@@ -73,6 +133,8 @@ class GoldenSM:
             take = {C_ALWAYS: True, C_NOTX: self.x == 0,
                     C_XDEC: self.x != 0, C_NOTY: self.y == 0,
                     C_YDEC: self.y != 0, C_XNEY: self.x != self.y,
+                    C_PIN: bool((self._gpio_in()
+                                 >> self.pc_cfg.get("jmp_pin", 0)) & 1),
                     C_NOTOSRE: not self._osr_empty()}[cond]
             if cond == C_XDEC:
                 self.x = (self.x - 1) & 0xFF
@@ -91,6 +153,7 @@ class GoldenSM:
             cnt = min(self.isr_cnt + n, 8)
             if self.autopush and cnt >= self.push_eff:
                 if len(self.rx) == 8:
+                    self._apply_side(ci)
                     self.parked = True  # stall on full RX
                     return False
                 self.rx.append(shifted)
@@ -101,6 +164,7 @@ class GoldenSM:
         elif opc == 3:  # OUT
             refill = self.autopull and self._osr_empty()
             if refill and not self.tx:
+                self._apply_side(ci)
                 self.parked = True
                 return False
             osr_eff = self.tx.pop(0) if refill else self.osr
@@ -113,10 +177,16 @@ class GoldenSM:
                 self.osr = (osr_eff << n) & 0xFF
             self.osr_cnt = min(cnt_eff + n, 8)
             dst = (ci >> 5) & 7
-            if dst == ODST_X:
+            if dst == ODST_PINS:
+                self._write_pins(self.pc_cfg.get("out_base", 0),
+                                 self.pc_cfg.get("out_count", 0), bits)
+            elif dst == ODST_X:
                 self.x = bits
             elif dst == ODST_Y:
                 self.y = bits
+            elif dst == ODST_PINDIRS:
+                self._write_dirs(self.pc_cfg.get("out_base", 0),
+                                 self.pc_cfg.get("out_count", 0), bits)
             elif dst == ODST_ISR:
                 self.isr, self.isr_cnt = bits, n
 
@@ -127,6 +197,7 @@ class GoldenSM:
                 if not iffull or self._osr_empty():
                     if not self.tx:
                         if block:
+                            self._apply_side(ci)
                             self.parked = True
                             return False
                         self.osr, self.osr_cnt = self.x, 0
@@ -136,6 +207,7 @@ class GoldenSM:
                 if not iffull or self.isr_cnt >= self.push_eff:
                     if len(self.rx) == 8:
                         if block:
+                            self._apply_side(ci)
                             self.parked = True
                             return False
                         self.isr, self.isr_cnt = 0, 0
@@ -151,7 +223,10 @@ class GoldenSM:
             elif op == M_REV:
                 val = _rev8(val)
             dst = (ci >> 5) & 7
-            if dst == MDST_X:
+            if dst == MDST_PINS:
+                self._write_pins(self.pc_cfg.get("out_base", 0),
+                                 self.pc_cfg.get("out_count", 0), val)
+            elif dst == MDST_X:
                 self.x = val
             elif dst == MDST_Y:
                 self.y = val
@@ -168,11 +243,18 @@ class GoldenSM:
 
         elif opc == 7:  # SET
             dst = (ci >> 5) & 7
-            if dst == SDST_X:
+            if dst == SDST_PINS:
+                self._write_pins(self.pc_cfg.get("set_base", 0),
+                                 self.pc_cfg.get("set_count", 0), ci & 0x1F)
+            elif dst == SDST_X:
                 self.x = ci & 0x1F
             elif dst == SDST_Y:
                 self.y = ci & 0x1F
+            elif dst == SDST_PINDIRS:
+                self._write_dirs(self.pc_cfg.get("set_base", 0),
+                                 self.pc_cfg.get("set_count", 0), ci & 0x1F)
 
+        self._apply_side(ci)  # side-set wins conflicts with the op above
         self.pc = jump if jump is not None else (self.pc + 1) & 0x1F
         return True
 
@@ -243,3 +325,88 @@ def random_case(seed, max_steps=2000):
         if g.parked or g.pc == park:
             return prog, cfg, tx, g, steps, seed
         seed += 7919  # non-terminating (nested bounded loops): resample
+
+
+def random_program_pins(rng, cfg, body_len=16):
+    """Random program over the pin-extended subset: SET/OUT/MOV to pins
+    and pindirs, IN/MOV from pins, JMP PIN, and random side-set bits
+    (decoded by the model from the instruction word, exactly like RTL)."""
+    def sbits():
+        cnt, opt = cfg["side_count"], cfg["side_opt"]
+        if cnt == 0:
+            return 0
+        if opt and rng.random() < 0.5:
+            return 0  # optional side-set left off: pins untouched
+        return side(rng.randrange(1 << cnt), cnt, bool(opt))
+
+    body = []
+    park = body_len + 4
+    for i in range(body_len):
+        kind = rng.random()
+        if kind < 0.20:
+            body.append(SET(rng.choice([SDST_PINS, SDST_PINDIRS, SDST_X,
+                                        SDST_Y]), rng.randrange(32),
+                            side=sbits()))
+        elif kind < 0.40:
+            body.append(MOV(rng.choice([MDST_PINS, MDST_X, MDST_Y, MDST_ISR,
+                                        MDST_OSR]),
+                            rng.choice([SRC_PINS, SRC_X, SRC_Y, SRC_NULL,
+                                        SRC_STATUS, SRC_ISR, SRC_OSR]),
+                            rng.choice([M_COPY, M_INV, M_REV]),
+                            side=sbits()))
+        elif kind < 0.55:
+            body.append(IN_(rng.choice([SRC_PINS, SRC_X, SRC_Y, SRC_NULL,
+                                        SRC_ISR, SRC_OSR]),
+                            rng.randrange(1, 9), side=sbits()))
+        elif kind < 0.70:
+            body.append(OUT(rng.choice([ODST_PINS, ODST_PINDIRS, ODST_X,
+                                        ODST_Y, ODST_NULL, ODST_ISR]),
+                            rng.randrange(1, 9), side=sbits()))
+        elif kind < 0.78:
+            body.append(PUSH(iffull=rng.randrange(2), block=rng.randrange(2),
+                             side=sbits()))
+        elif kind < 0.86:
+            body.append(PULL(ifempty=rng.randrange(2), block=rng.randrange(2),
+                             side=sbits()))
+        else:
+            cond = rng.choice([C_ALWAYS, C_NOTX, C_XDEC, C_NOTY, C_YDEC,
+                               C_XNEY, C_PIN, C_NOTOSRE])
+            if cond in (C_XDEC, C_YDEC):
+                target = rng.randrange(0, park + 1)
+            else:
+                target = rng.randrange(i + 1, park + 1)
+            body.append(JMP(target, cond, side=sbits()))
+    dump = [MOV(MDST_ISR, SRC_X), PUSH(block=0),
+            MOV(MDST_ISR, SRC_Y), PUSH(block=0)]
+    return body + dump + [JMP(park)]
+
+
+def random_case_pins(seed, pins, dirs, max_steps=2000):
+    """One terminating pin-extended case. pins/dirs carry the pad state
+    left by the previous seed (project-level registers survive restarts)."""
+    while True:
+        rng = random.Random(seed)
+        cfg = dict(
+            shiftctrl=rng.randrange(16),
+            thresh=rng.randrange(256),
+            status_cfg=rng.randrange(32),
+            out_base=rng.randrange(16), out_count=rng.randrange(9),
+            set_base=rng.randrange(16), set_count=rng.randrange(8),
+            in_base=rng.randrange(16),
+            side_base=rng.randrange(16), side_count=rng.randrange(3),
+            side_opt=rng.randrange(2),
+            jmp_pin=rng.randrange(16),
+        )
+        prog = random_program_pins(rng, cfg)
+        tx = [rng.randrange(256) for _ in range(rng.randrange(7))]
+        g = GoldenSM(prog, cfg["shiftctrl"], cfg["thresh"],
+                     cfg["status_cfg"], tx, pin_cfg=cfg,
+                     pins=pins, dirs=dirs)
+        steps = 0
+        park = len(prog) - 1
+        while steps < max_steps and not g.parked and g.pc != park:
+            g.step()
+            steps += 1
+        if g.parked or g.pc == park:
+            return prog, cfg, tx, g, steps, seed
+        seed += 7919
