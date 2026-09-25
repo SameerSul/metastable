@@ -165,8 +165,9 @@ flow with the protocol demos:
 
 Beyond the directed suite, seeded constrained-random programs run
 against a golden architectural model of the state machine
-(`test/golden.py`), comparing PC, IRQ flags and exact RX FIFO contents
-per seed; the SPI host interface is fuzzed with random bursts and
+(`test/golden.py`) - one suite over the architectural subset (PC, IRQ
+flags, exact RX FIFO contents per seed) and one over the pin datapath
+(pins, pindirs, side-set, JMP PIN, GPIO readback compared bit-exactly); the SPI host interface is fuzzed with random bursts and
 mid-byte CS_N aborts against a reference model; and three blocks carry
 formal proofs (BMC + k-induction, `formal/run.sh`): the FIFO's
 structural invariants and in-order data integrity, the clock divider's

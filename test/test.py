@@ -16,13 +16,14 @@ from metastable import (
     MDST_X, MDST_Y, MDST_EXEC, MDST_ISR, M_INV, M_REV,
     SDST_PINS, SDST_PINDIRS, SDST_X, SDST_Y,
     C_NOTX, C_XDEC, C_YDEC, C_XNEY, C_PIN, C_NOTOSRE, W_PIN, W_GPIO, W_IRQ,
-    R_CTRL, R_FSTAT, R_IRQ, R_IRQ_MASK, R_GPIO_IN_H, R_PC0, R_FLEVEL0, SM,
+    R_CTRL, R_FSTAT, R_IRQ, R_IRQ_MASK, R_GPIO_IN_L, R_GPIO_IN_H, R_PC0,
+    R_FLEVEL0, SM,
     CLKDIV_INT_L, CLKDIV_FRAC, WRAP_TOP, WRAP_BOTTOM, SHIFTCTRL, THRESH,
     PIN_OUT, PIN_SET, PIN_IN, PIN_SIDE, JMP_PIN,
     AUTOPULL, AUTOPUSH, OUT_RIGHT, IN_RIGHT, SIDE_OPT, SIDE_PINDIR,
     TXF, RXF, STATUS_CFG, STATUS_RX,
 )
-from golden import random_case
+from golden import random_case, random_case_pins
 
 
 async def setup(dut):
@@ -1079,3 +1080,76 @@ async def test_spi_fuzz(dut):
         f"{[hex(a) for a in range(0x40) if got[a] != exp[a]]}")
     dut._log.info("SPI fuzz: 60 transactions incl. mid-byte aborts, "
                   "imem state matches the reference model exactly")
+
+
+@cocotb.test()
+async def test_random_cosim_pins(dut):
+    """Constrained-random cosim over the pin datapath: random programs
+    with SET/OUT/MOV to pins and pindirs, IN/MOV from pins, JMP PIN and
+    random side-set bits (optional and non-optional), random pin base
+    configs across the whole 16-pin space. Runs at divider 8 so the pad
+    loopback + 2FF sync settle between ticks; pin state carries across
+    seeds like the real project-level registers do. Compares PC, RX FIFO
+    contents and the GPIO_IN readback against the golden model.
+    """
+    spi = await setup(dut)
+    cocotb.start_soon(uio_loopback(dut))
+
+    # zero all pin/dir latches: earlier tests in this sim leave state
+    zero = [
+        SET(SDST_PINS, 0), SET(SDST_PINDIRS, 0),
+    ]
+    await spi.load_program(0, zero + [JMP(2)])
+    for base, cnt in ((0, 7), (7, 7), (14, 2)):
+        await spi.write(SM(0) + PIN_SET, (cnt << 4) | base)
+        await spi.write(R_CTRL, 0x11)
+        await ClockCycles(dut.clk, 200)
+        await spi.write(R_CTRL, 0x00)
+
+    pins = dirs = 0
+    for seed in range(8):
+        prog, cfg, tx, g, steps, used_seed = random_case_pins(
+            seed, pins, dirs)
+
+        await spi.write(SM(0) + WRAP_BOTTOM, 0)
+        await spi.write(SM(0) + WRAP_TOP, 31)
+        await spi.write(R_CTRL, 0x10)
+        await spi.load_program(0, prog)
+        await spi.write(SM(0) + CLKDIV_INT_L, 8)
+        await spi.write(SM(0) + CLKDIV_FRAC, 0)
+        await spi.write(SM(0) + SHIFTCTRL, cfg["shiftctrl"])
+        await spi.write(SM(0) + THRESH, cfg["thresh"])
+        await spi.write(SM(0) + STATUS_CFG, cfg["status_cfg"])
+        await spi.write(SM(0) + PIN_OUT,
+                        (cfg["out_count"] << 4) | cfg["out_base"])
+        await spi.write(SM(0) + PIN_SET,
+                        (cfg["set_count"] << 4) | cfg["set_base"])
+        await spi.write(SM(0) + PIN_IN, cfg["in_base"])
+        await spi.write(SM(0) + PIN_SIDE,
+                        (cfg["side_opt"] << 6) | (cfg["side_count"] << 4)
+                        | cfg["side_base"])
+        await spi.write(SM(0) + JMP_PIN, cfg["jmp_pin"])
+        if tx:
+            await spi.write(SM(0) + TXF, tx)
+        await spi.write(R_CTRL, 0x01)
+
+        await ClockCycles(dut.clk, (steps + 60) * 8)
+
+        await spi.write(R_CTRL, 0x00)
+        pc = (await spi.read(R_PC0, 1))[0]
+        gin = await spi.read(R_GPIO_IN_L, 2)
+        gin = gin[0] | (gin[1] << 8)
+        rx = []
+        while len(rx) <= 8 and not (await spi.read(R_FSTAT, 1))[0] & 0x04:
+            rx += await spi.read(SM(0) + RXF, 1)
+
+        assert pc == g.pc, f"seed {used_seed}: PC {pc} != {g.pc}"
+        assert rx == g.rx, f"seed {used_seed}: RX {rx} != {g.rx}"
+        exp_gin = g._gpio_in()
+        assert gin == exp_gin, (
+            f"seed {used_seed}: GPIO_IN {gin:#06x} != {exp_gin:#06x} "
+            f"(pins {g.pins:#06x} dirs {g.dirs:#06x})")
+        pins, dirs = g.pins, g.dirs  # pad latches persist across seeds
+        dut._log.info(
+            f"pin cosim seed {used_seed}: {steps} steps, pc={pc}, "
+            f"rx={len(rx)}, gpio_in={gin:#06x} OK")
