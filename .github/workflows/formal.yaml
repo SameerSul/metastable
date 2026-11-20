@@ -13,6 +13,9 @@ jobs:
 
       - name: install oss-cad-suite (yosys, yosys-smtbmc, z3)
         uses: YosysHQ/setup-oss-cad-suite@v3
+        with:
+          # an authenticated lookup avoids the anonymous API rate limit on shared runners
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: prove pio_fifo properties
         run: ./formal/run.sh
