@@ -1,4 +1,6 @@
 """Architecture block diagram for the Metastable datasheet."""
+import os
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -96,6 +98,6 @@ ax.text(56, 62.5, "Metastable: programmable protocol emulator",
         ha="center", fontsize=14, fontweight="bold", color=INK)
 
 fig.tight_layout()
-fig.savefig("/Users/ssuleman/Desktop/ML4PD Projects/Metastable/metastable/docs/architecture.png",
+fig.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "architecture.png"),
             dpi=150, bbox_inches="tight", facecolor="white")
 print("saved")

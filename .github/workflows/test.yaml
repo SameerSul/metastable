@@ -31,6 +31,9 @@ jobs:
           # make will return success even if the tests fail, so check results.xml for failed tests
           python -m cocotb_tools.check_results results.xml
 
+      - name: Check the test count that the README states
+        run: python test/readme_counts.py --check
+
       - name: Test Summary
         uses: test-summary/action@v2.4
         with:

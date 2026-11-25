@@ -127,7 +127,8 @@ straightforward.
 `sw/metastable_asm.py` is a Python ISA assembler that runs on CPython and
 MicroPython; `sw/metastable_host.py` is a register-level host driver for
 the demo board's RP2040 (bit-banged mode-0 SPI over `ui[2:0]`/`uo[0]`),
-and `sw/examples/uart_loopback.py` runs the UART demo on silicon. The
+and `sw/examples/uart_loopback.py` is the UART demo for the fabricated
+chip. No chip exists yet, so the results below are from simulation. The
 cocotb suite imports the same assembler. Every protocol demo below has
 an example file in `sw/examples`, and a test in `test/test.py` that
 loads the program and the register settings from that file:
@@ -155,7 +156,7 @@ loads the program and the register settings from that file:
 - **WS2812 / NeoPixel**: SM0 drives 800 kHz pulse-width-coded LED data
   (8 MHz fractional tick, 10 ticks/bit); every pulse is checked against
   the WS2812B datasheet windows and the GRB frame reassembled.
-  `sw/examples/ws2812.py` runs it on silicon.
+  `sw/examples/ws2812.py` is the same program for the fabricated chip.
 - **USB low-speed TX**: a complete DATA0 packet on D+/D- at 1.5 MHz,
   decoded and field-checked by an independent bus model (see Protocol
   reach above).

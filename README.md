@@ -12,7 +12,7 @@ Full datasheet: [docs/info.md](docs/info.md)
 
 | | |
 |---|---|
-| Protocols demonstrated | UART, SPI (modes 0 to 3), I2C (write and read, 100 kHz and 400 kHz), Manchester, WS2812, USB LS (1.5 MHz, +299 ppm), PS/2, NEC IR — plus capture/replay and two protocols concurrently |
+| Protocols demonstrated in simulation | UART, SPI (modes 0 to 3), I2C (write and read, 100 kHz and 400 kHz), Manchester, WS2812, USB LS (1.5 MHz, +299 ppm), PS/2, NEC IR — plus capture/replay and two protocols concurrently |
 | Verification | 27 cocotb tests (independent bus/decoder models), constrained-random cosim vs a golden model, SPI fuzz with mid-byte aborts, formal proofs on 3 blocks (BMC + k-induction) |
 | Timing theorem | proved: 256 divider ticks span exactly `256*div_int + div_frac` cycles — zero cumulative drift |
 | Implementation | 6x4 tiles, 22% util, +1.45 ns setup @ slow corner after a placement audit recovered 4.3x margin, ~4.7 mW |
@@ -55,8 +55,10 @@ A Python assembler for the ISA lives in
 [sw/metastable_asm.py](sw/metastable_asm.py); it runs on CPython and
 MicroPython and is shared by the cocotb suite and the demo-board host
 driver ([sw/metastable_host.py](sw/metastable_host.py)).
-[sw/examples/uart_loopback.py](sw/examples/uart_loopback.py) runs the
-verified UART demo on real silicon from the TT demo board's RP2040.
+[sw/examples/uart_loopback.py](sw/examples/uart_loopback.py) is the
+verified UART demo, written for the fabricated chip and the TT demo
+board's RP2040. No chip exists yet, so every result here is from
+simulation.
 
 ## Testing
 

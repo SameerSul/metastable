@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Sameer Suleman
 # SPDX-License-Identifier: Apache-2.0
 #
-# The same UART program the cocotb suite verifies, run on real silicon:
+# The same UART program the cocotb suite verifies, for the fabricated chip:
 # SM0 transmits 8N1 frames on GPIO0 (uio[0]), SM1 receives on the same pin
 # through the pin router, and the bytes come back over SPI.
 #

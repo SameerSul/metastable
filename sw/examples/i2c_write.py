@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # The same open-drain I2C master the cocotb suite verifies against an
-# ACKing slave model, run on silicon. SDA = uio[0], SCL = uio[1]; both
+# ACKing slave model, for the fabricated chip. SDA = uio[0], SCL = uio[1]; both
 # need external pull-ups (2.2-10 kOhm to 3.3 V). Pin output latches stay
 # at 0 and the program only toggles pin *directions*: dir=1 drives low,
 # dir=0 releases to the pull-up — true open drain.

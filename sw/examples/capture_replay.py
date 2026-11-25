@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Sameer Suleman
 # SPDX-License-Identifier: Apache-2.0
 #
-# The suite-verified capture/replay programs on silicon: SM0 samples
+# The suite-verified capture/replay programs, for the fabricated chip: SM0 samples
 # GPIO4-7 (IN PINS,4) into a snapshot that freezes itself when the RX
 # FIFO fills; SM1 replays a 4-bit waveform from its FIFO (OUT PINS,4).
 # Use them separately (probe an external bus / generate a stimulus) or
