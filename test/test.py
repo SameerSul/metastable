@@ -1301,7 +1301,8 @@ async def test_reload_from_unknown(dut):
     slave fetches the next byte ahead of the host. After the last byte
     that is the next word of the FIFO storage, which nothing has written
     since reset, and its top bit shows on MISO until CS_N rises. The
-    host has all eight bits by then and does not sample it.
+    test checks that every such sample comes after the host's last
+    sampling edge: the host has all eight bits by then.
 
     The RTL has no cells to toggle. There the test runs the same three
     rounds from whatever state the round before left.
@@ -1377,12 +1378,16 @@ async def test_reload_from_unknown(dut):
         first = await spi.read(SM(sm) + RXF, 1)
         stage[0] = "the read that empties the FIFO"
         second = await spi.read(SM(sm) + RXF, 1)
+        # The host's last two half periods of SCK: it has sampled all its
+        # bits, SCK stays low, and then CS_N rises. The clock is 20 ns.
+        t_tail = get_sim_time("ns") - 2 * SPI_HALF * 20
         stage[0] = "after the reads"
         await ClockCycles(dut.clk, 20)
         watcher.cancel()
 
         tail = [f for f in found if f[0] == "the read that empties the FIFO"
-                and f[1] == "uo_out" and re.fullmatch(r"[01]{7}[^01]", f[2])]
+                and f[1] == "uo_out" and re.fullmatch(r"[01]{7}[^01]", f[2])
+                and f[3] >= t_tail]
         other = [f for f in found if f not in tail]
         assert not other, (f"engine {sm}: {len(other)} unknown output samples "
                            f"after reset, the first {other[:3]}")

@@ -69,6 +69,8 @@ cd test && make
 Verification has three legs: a directed cocotb suite with eight protocol
 demos and ISA corner coverage, constrained-random co-simulation against a
 golden architectural model, and formal proofs.
+[docs/verification.md](docs/verification.md) states what each check
+covers, what it leaves out, and how to run it.
 
 Every protocol demo has an example file in [sw/examples](sw/examples),
 and a test that loads the program and the register settings from that
