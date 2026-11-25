@@ -24,6 +24,23 @@ Every protocol in the cocotb suite has its example file here, and a test
 that loads the program and the register settings from that file. So the
 suite checks what ships.
 
+## How the host side is tested
+
+`test/test_examples.py` runs each example the way a user does: it calls
+the example's own `main()` or host function. In that file the name
+`ttboard.demoboard` is a stand-in (`test/standin`), with the simulated
+chip behind the board's pins. So the driver in `metastable_host.py`, the
+example's host code and the program run together, on the RTL and on the
+gate-level netlist.
+
+The stand-in's host is slow on purpose, as a bit-banged host is. Four
+examples therefore load their data while the state machine is stopped,
+and start it afterwards: `ws2812.py`, `manchester.py`, `ps2_device.py`
+and `capture_replay.py`. One call of these takes what the 8-byte FIFO
+holds, for example two LEDs. `usb_ls_tx.py` and `two_protocols.py` need
+a host that paces its SPI writes. They have no host function, and so no
+test of this kind.
+
 ## Demo board quick start
 
 The chip's SPI slave sits on `ui[0]`=SCK, `ui[1]`=CS_N, `ui[2]`=MOSI,

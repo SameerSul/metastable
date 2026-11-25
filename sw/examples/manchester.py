@@ -57,14 +57,21 @@ def setup(host, clkdiv=8):
     host.load_program(RX0, RX_PROG)
     for addr, value in config(clkdiv):
         host.write(addr, value)
-    host.ctrl(0b11, 0b11)
 
 
 def loopback(host, payload):
     """Send the preamble and the payload, and return what SM1 decoded.
-    The receiver free-runs after the frame, so only the first bytes count."""
+
+    The frame is loaded while both state machines are stopped, and then
+    both start together. A gap between two bytes would leave the line
+    still, and the receiver would decode the still line as data. So the
+    frame has to fit the FIFO: the preamble and at most 7 bytes. The
+    receiver free-runs after the frame, so only the first bytes count.
+    """
     assert len(payload) <= 7
-    host.tx(0, [PREAMBLE] + list(payload))
+    host.ctrl(0b00, 0b11)                               # both stopped, FIFOs empty
+    host.write(SM(0) + TXF, [PREAMBLE] + list(payload))
+    host.ctrl(0b11, 0b00)                               # both start
     return host.rx(1, len(payload) + 1)[1:]
 
 

@@ -131,7 +131,9 @@ and `sw/examples/uart_loopback.py` is the UART demo for the fabricated
 chip. No chip exists yet, so the results below are from simulation. The
 cocotb suite imports the same assembler. Every protocol demo below has
 an example file in `sw/examples`, and a test in `test/test.py` that
-loads the program and the register settings from that file:
+loads the program and the register settings from that file.
+`test/test_examples.py` also runs each example's own host code against
+the simulated chip, through a stand-in for the demo board's library:
 
 - **UART loopback**: SM0 runs an 8N1 transmitter on GPIO0, SM1 a
   receiver on the same pin; bytes pushed into SM0's TX FIFO over SPI

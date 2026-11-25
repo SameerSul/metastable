@@ -13,7 +13,7 @@ Full datasheet: [docs/info.md](docs/info.md)
 | | |
 |---|---|
 | Protocols demonstrated in simulation | UART, SPI (modes 0 to 3), I2C (write and read, 100 kHz and 400 kHz), Manchester, WS2812, USB LS (1.5 MHz, +299 ppm), PS/2, NEC IR — plus capture/replay and two protocols concurrently |
-| Verification | 27 cocotb tests (independent bus/decoder models), constrained-random cosim vs a golden model, SPI fuzz with mid-byte aborts, formal proofs on 3 blocks (BMC + k-induction) |
+| Verification | 38 cocotb tests (independent bus/decoder models), constrained-random cosim vs a golden model, SPI fuzz with mid-byte aborts, formal proofs on 3 blocks (BMC + k-induction) |
 | Timing theorem | proved: 256 divider ticks span exactly `256*div_int + div_frac` cycles — zero cumulative drift |
 | Implementation | 6x4 tiles, 22% util, +1.45 ns setup @ slow corner after a placement audit recovered 4.3x margin, ~4.7 mW |
 | Host software | MicroPython assembler + driver + examples for the TT demo board |
@@ -72,8 +72,11 @@ golden architectural model, and formal proofs.
 
 Every protocol demo has an example file in [sw/examples](sw/examples),
 and a test that loads the program and the register settings from that
-file, so the suite checks the programs that ship. The cocotb suite
-([test/test.py](test/test.py)) covers:
+file, so the suite checks the programs that ship.
+[test/test_examples.py](test/test_examples.py) also runs each example's
+own host code against the simulated chip, through a stand-in for the
+demo board's library. The cocotb suite ([test/test.py](test/test.py))
+covers:
 
 - **UART loopback** — SM0 transmits 8N1 frames on GPIO0, SM1 receives them
   on the same pin through the pin router

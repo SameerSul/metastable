@@ -52,15 +52,25 @@ def setup(host):
 
 
 def show(host, colors):
-    """colors: list of (r, g, b) tuples; WS2812 wants GRB, MSB first."""
+    """colors: list of (r, g, b) tuples; WS2812 wants GRB, MSB first.
+
+    The frame is loaded while the state machine is stopped, and then the
+    state machine starts. A gap between two bytes would read as a latch,
+    and a bit-banged host is far slower than the 1.25 us of a bit. One
+    call therefore takes at most 8 bytes, the depth of the FIFO: two
+    LEDs. A host that paces its SPI writes can stream a longer strip.
+    """
     data = []
     for r, g, b in colors:
         data += [g & 0xFF, r & 0xFF, b & 0xFF]
-    host.tx(0, data)
+    assert len(data) <= 8, "one call takes at most two LEDs"
+    host.ctrl(0b00, 0b01)            # stopped at the first instruction, FIFO empty
+    host.write(SM(0) + TXF, data)    # one burst: the address holds on the FIFO
+    host.ctrl(0b01, 0b00)            # start
     # latch happens by itself: the OUT stalls low once the FIFO drains
 
 
-def main(colors=((255, 0, 0), (0, 255, 0), (0, 0, 255))):
+def main(colors=((255, 0, 0), (0, 0, 255))):
     from ttboard.demoboard import DemoBoard
 
     tt = DemoBoard.get()

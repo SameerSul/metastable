@@ -35,6 +35,7 @@ def config(div=16):
 
 
 def setup(host, div=16):
+    host.ctrl(0, 0)
     host.load_program(0, CAP_PROG)
     host.load_program(AWG0, AWG_PROG)
     for addr, value in config(div):
@@ -42,13 +43,21 @@ def setup(host, div=16):
 
 
 def replay(host, nibbles, div=16):
-    """Stream a waveform (list of 0..15) out of GPIO4-7."""
+    """Send a waveform (list of 0..15) out of GPIO4-7.
+
+    The first 16 symbols are loaded while the state machine is stopped,
+    so they come out at the exact rate, 2 ticks a symbol. Symbols after
+    those go in as the FIFO has room, at the pace of the host.
+    """
     setup(host, div)
     if len(nibbles) % 2:
         nibbles = list(nibbles) + [nibbles[-1]]
-    host.ctrl(0b10, 0b10)
-    host.tx(1, [(nibbles[i] << 4) | nibbles[i + 1]
-                for i in range(0, len(nibbles), 2)])
+    packed = [(nibbles[i] << 4) | nibbles[i + 1]
+              for i in range(0, len(nibbles), 2)]
+    host.ctrl(0b00, 0b10)                  # SM1 stopped at its first instruction
+    host.write(SM(1) + TXF, packed[:8])    # one burst: the address holds on the FIFO
+    host.ctrl(0b10, 0b00)                  # start
+    host.tx(1, packed[8:])
 
 
 def capture(host, div=16):

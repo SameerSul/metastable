@@ -15,6 +15,7 @@
 from metastable_asm import *
 
 DATA, CLK = 0, 1
+PULL_ADDR = 2        # where the program waits for a frame
 H, L = side(1, 1), side(0, 1)
 
 PROG = [
@@ -55,13 +56,28 @@ def setup(host, clkdiv=250):
     host.ctrl(0b01, 0b01)
 
 
+def wait_idle(host):
+    """Wait until the state machine is back at its PULL with an empty
+    FIFO: the last frame is out."""
+    while host.read(R_PC0, 1)[0] != PULL_ADDR or not host.fstat(0)["tx_empty"]:
+        pass
+
+
 def send(host, codes):
-    """Send each byte as one frame. Both FIFO bytes of a frame go in one
-    SPI write, so the second is there when the frame needs it."""
+    """Send each byte as one frame.
+
+    Both FIFO bytes of a frame are loaded while the state machine is
+    stopped, and then it runs. The second byte is then there when the
+    frame needs it, however slow the host is. A stall in the middle of a
+    frame would stretch one clock pulse, and a PS/2 host can drop such a
+    frame.
+    """
     for code in codes:
-        while not host.fstat(0)["tx_empty"]:
-            pass
-        host.write(SM(0) + TXF, frame_bytes(code))
+        wait_idle(host)
+        host.ctrl(0b00, 0b00)                        # stopped where it is, at the PULL
+        host.write(SM(0) + TXF, frame_bytes(code))   # one burst: both bytes
+        host.ctrl(0b01, 0b00)                        # go
+    wait_idle(host)
 
 
 def main(codes=(0x1C, 0xF0)):
