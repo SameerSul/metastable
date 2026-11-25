@@ -34,6 +34,13 @@ The host talks to the chip over a mode-0 SPI slave: one command byte
 `{RW, ADDR[6:0]}` followed by data bytes with address auto-increment
 (held for FIFO registers).
 
+A read of RXF returns a word of the FIFO storage and pops it. When the
+RX FIFO is empty, nothing is popped and the word is not valid data, so
+read FSTAT or FLEVEL first. The port fetches each byte ahead of the
+host: after the last byte of a read that empties the FIFO, MISO shows
+one bit of the next storage word until CS_N rises. The host has its
+eight bits by then, and ignores MISO after its last clock.
+
 ### Register map
 
 `0x00-0x3F` is instruction memory, byte-accessed: address `2i` is
