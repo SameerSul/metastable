@@ -5,10 +5,12 @@
 import collections
 import json
 import os
+import re
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles
+from cocotb.triggers import ClockCycles, FallingEdge, Timer
+from cocotb.utils import get_sim_time
 
 from metastable import (
     SPI_HALF, SpiHost, uio_loopback, I2CSlave, WS2812Decoder, UsbLsDecoder,
@@ -25,7 +27,7 @@ from metastable import (
     CLKDIV_INT_L, CLKDIV_FRAC, WRAP_TOP, WRAP_BOTTOM, SHIFTCTRL, THRESH,
     PIN_OUT, PIN_SET, PIN_IN, PIN_SIDE, JMP_PIN,
     AUTOPULL, AUTOPUSH, SIDE_OPT,
-    TXF, RXF, STATUS_CFG, STATUS_RX,
+    TXF, RXF, STATUS_CFG, STATUS_RX, sm_config,
 )
 from golden import random_case, random_case_pins
 import capture_replay
@@ -1269,3 +1271,128 @@ async def test_i2c_read_no_device(dut):
     assert len(bus.starts) == 2 and len(bus.stops) == 2
     t = i2c_check_timing(bus, "fast", ["t_buf", "t_su_sto", "t_hd_sta"])
     dut._log.info("fast mode, ns: %s", t)
+
+
+def netlist_flops(path):
+    """The instance names of a netlist's flip-flops: the cells with a
+    clock pin and a Q pin."""
+    with open(path) as f:
+        text = f.read()
+    cells = re.findall(r"^\s*(\w+)\s+(\\\S+\s|[^\s(]+)\s*\((.*?)\);", text, re.S | re.M)
+    return [name.strip().lstrip("\\").strip() for _, name, body in cells
+            if ".CLK(" in body and ".Q(" in body]
+
+
+@cocotb.test()
+async def test_reload_from_unknown(dut):
+    """Reset, load and run, from a state in which every flip-flop is unknown.
+
+    On the gate-level netlist the test first makes every flip-flop
+    unknown: it toggles the notifier of each flip-flop cell, which is how
+    the cell models answer a timing violation. That stands for a design
+    that was just powered, or deselected and selected again. Then the
+    test applies reset, loads a program, runs it and reads its two
+    result bytes. It does that three times, with a different program,
+    engine and pin pair each time.
+
+    From the release of reset on, the test samples the 24 output pins in
+    every clock cycle. None may be unknown, with one exception that the
+    test pins down: MISO, in the read that empties an RX FIFO. The SPI
+    slave fetches the next byte ahead of the host. After the last byte
+    that is the next word of the FIFO storage, which nothing has written
+    since reset, and its top bit shows on MISO until CS_N rises. The
+    host has all eight bits by then and does not sample it.
+
+    The RTL has no cells to toggle. There the test runs the same three
+    rounds from whatever state the round before left.
+    """
+    spi = await setup(dut)
+    outputs = ("uo_out", "uio_out", "uio_oe")
+    gate = os.environ.get("GATES") == "yes"
+    notifiers = []
+    if gate:
+        flops = netlist_flops("gate_level_netlist.v")
+        assert len(flops) > 1000, f"only {len(flops)} flip-flops found in the netlist"
+        notifiers = [dut.user_project[name].notifier for name in flops]
+        dut._log.info("%d flip-flops to make unknown", len(notifiers))
+    phase = 0
+
+    def program(origin, pins_a, value, pins_b):
+        return [
+            SET(SDST_PINDIRS, 3),      # two pins drive
+            SET(SDST_PINS, pins_a),
+            SET(SDST_X, value),
+            MOV(MDST_ISR, SRC_X),
+            PUSH(block=1),             # the first byte for the host
+            MOV(MDST_ISR, SRC_X, M_INV),
+            PUSH(block=1),             # the second: the first, inverted
+            SET(SDST_PINS, pins_b),
+            JMP(origin + 8),           # park
+        ]
+
+    stage = ["start"]
+
+    async def watch(found):
+        """Note every clock cycle in which an output pin is unknown."""
+        while True:
+            await FallingEdge(dut.clk)
+            for name in outputs:
+                value = getattr(dut, name).value
+                if not value.is_resolvable:
+                    found.append((stage[0], name, str(value), get_sim_time("ns")))
+
+    # (engine, first pin of the pair, origin, pins before, byte, pins after)
+    rounds = [(0, 0, 0, 1, 21, 2), (1, 4, 9, 2, 9, 1), (0, 6, 18, 3, 30, 0)]
+    for sm, base, origin, pins_a, value, pins_b in rounds:
+        if gate:
+            phase ^= 1
+            for notifier in notifiers:
+                notifier.value = phase
+            await Timer(1, unit="ns")
+            await FallingEdge(dut.clk)
+            unknown = [name for name in outputs
+                       if not getattr(dut, name).value.is_resolvable]
+            assert "uio_oe" in unknown and "uio_out" in unknown, \
+                f"the flip-flops did not become unknown: only {unknown} is"
+
+        dut.ui_in.value = 0x02  # CS_N high
+        dut.uio_in.value = 0
+        dut.rst_n.value = 0
+        await ClockCycles(dut.clk, 10)
+        dut.rst_n.value = 1
+        found = []
+        stage[0] = "load and run"
+        watcher = cocotb.start_soon(watch(found))
+        await ClockCycles(dut.clk, 10)
+
+        await spi.load_program(origin, program(origin, pins_a, value, pins_b))
+        for addr, data in sm_config(sm, wrap_bottom=origin, wrap_top=origin + 8,
+                                    pin_set=(2 << 4) | base):
+            await spi.write(addr, data)
+        await spi.write(R_CTRL, (1 << sm) | (0x10 << sm))  # restart and enable
+        await ClockCycles(dut.clk, 100)
+
+        level = (await spi.read(R_FLEVEL0 + sm, 1))[0] >> 4
+        stage[0] = "first read"
+        first = await spi.read(SM(sm) + RXF, 1)
+        stage[0] = "the read that empties the FIFO"
+        second = await spi.read(SM(sm) + RXF, 1)
+        stage[0] = "after the reads"
+        await ClockCycles(dut.clk, 20)
+        watcher.cancel()
+
+        tail = [f for f in found if f[0] == "the read that empties the FIFO"
+                and f[1] == "uo_out" and re.fullmatch(r"[01]{7}[^01]", f[2])]
+        other = [f for f in found if f not in tail]
+        assert not other, (f"engine {sm}: {len(other)} unknown output samples "
+                           f"after reset, the first {other[:3]}")
+        assert level == 2 and first == [value] and second == [value ^ 0xFF], \
+            f"engine {sm}: RX level {level}, bytes {first} {second}, expected {value} and its inverse"
+        oe, out = int(dut.uio_oe.value), int(dut.uio_out.value)
+        assert oe == 3 << base and out == pins_b << base, \
+            f"engine {sm}: uio_oe {oe:#04x}, uio_out {out:#04x}"
+        dut._log.info(
+            "engine %d from %s: bytes %d and %d, pins %#04x; MISO unknown in %d clock "
+            "cycles after the last byte, no other output unknown",
+            sm, "an unknown state" if gate else "the last state",
+            value, value ^ 0xFF, out, len(tail))

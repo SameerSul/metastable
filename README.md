@@ -13,7 +13,7 @@ Full datasheet: [docs/info.md](docs/info.md)
 | | |
 |---|---|
 | Protocols demonstrated in simulation | UART, SPI (modes 0 to 3), I2C (write and read, 100 kHz and 400 kHz), Manchester, WS2812, USB LS (1.5 MHz, +299 ppm), PS/2, NEC IR — plus capture/replay and two protocols concurrently |
-| Verification | 38 cocotb tests (independent bus/decoder models), constrained-random cosim vs a golden model, SPI fuzz with mid-byte aborts, formal proofs on 4 blocks and the pin router (BMC + k-induction) |
+| Verification | 39 cocotb tests (independent bus/decoder models), constrained-random cosim vs a golden model, SPI fuzz with mid-byte aborts, formal proofs on 4 blocks and the pin router (BMC + k-induction) |
 | Timing theorem | proved: 256 divider ticks span exactly `256*div_int + div_frac` cycles — zero cumulative drift |
 | Implementation | 6x4 tiles, 22% util, +1.45 ns setup @ slow corner after a placement audit recovered 4.3x margin, ~4.7 mW |
 | Host software | MicroPython assembler + driver + examples for the TT demo board |
@@ -134,6 +134,13 @@ covers:
 - **SPI host-interface fuzz** — random read/write bursts interleaved
   with transfers aborted by CS_N mid-byte at random bit offsets, checked
   against a reference model: only fully clocked bytes commit
+- **Reload from an unknown state** — on the gate-level netlist the test
+  makes every flip-flop unknown, applies reset, loads a program, runs it
+  and reads its result, three times with a different engine and pin
+  pair. After reset no output pin is unknown, with one case that the
+  test pins down: in the read that empties an RX FIFO, MISO shows the
+  top bit of the next, unwritten FIFO word after the last byte, until
+  CS_N rises. The host has its eight bits by then
 
 Formal ([formal/run.sh](formal/run.sh), CI job `formal`, yosys-smtbmc
 BMC + k-induction, properties under `ifdef FORMAL`) covers three blocks:
