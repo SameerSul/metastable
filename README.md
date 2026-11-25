@@ -13,7 +13,7 @@ Full datasheet: [docs/info.md](docs/info.md)
 | | |
 |---|---|
 | Protocols demonstrated in simulation | UART, SPI (modes 0 to 3), I2C (write and read, 100 kHz and 400 kHz), Manchester, WS2812, USB LS (1.5 MHz, +299 ppm), PS/2, NEC IR — plus capture/replay and two protocols concurrently |
-| Verification | 38 cocotb tests (independent bus/decoder models), constrained-random cosim vs a golden model, SPI fuzz with mid-byte aborts, formal proofs on 3 blocks (BMC + k-induction) |
+| Verification | 38 cocotb tests (independent bus/decoder models), constrained-random cosim vs a golden model, SPI fuzz with mid-byte aborts, formal proofs on 4 blocks and the pin router (BMC + k-induction) |
 | Timing theorem | proved: 256 divider ticks span exactly `256*div_int + div_frac` cycles — zero cumulative drift |
 | Implementation | 6x4 tiles, 22% util, +1.45 ns setup @ slow corner after a placement audit recovered 4.3x margin, ~4.7 mW |
 | Host software | MicroPython assembler + driver + examples for the TT demo board |
@@ -138,6 +138,14 @@ cycles, zero cumulative drift; and the SPI slave's register-bus strobe
 discipline (single-cycle, exclusive, exactly-once) proved with no
 assumptions at all on the pad waveforms — arbitrary SCK glitches and
 mid-byte aborts included.
+
+The same script proves two more things. For every instruction word,
+configuration and input, the instruction engine never pops an empty TX
+FIFO, never pushes into a full RX FIFO, and keeps its shift counters in
+0..8. And with the whole design around it, the pin router gives each pin
+the value of the engine that writes it, lets the second engine win when
+both write, and holds a pin that nobody writes. The same goes for the
+pin directions.
 
 The layout's netlist is proved against the RTL as well
 ([formal/netlist_equiv.py](formal/netlist_equiv.py)). The script pairs

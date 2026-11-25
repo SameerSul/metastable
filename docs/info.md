@@ -191,7 +191,11 @@ exactly 256*div_int + div_frac cycles - the zero-drift property the USB
 LS bit clock relies on), and the SPI slave's strobe discipline under
 arbitrary pad waveforms (single-cycle, exclusive, exactly-once - what
 makes FIFO pops over SPI exactly-once even through glitches and
-aborts).
+aborts). The same script proves that the instruction engine never pops
+an empty FIFO or pushes into a full one and keeps its shift counters in
+0..8, for every instruction word and configuration, and that the pin
+router gives a pin the value of the engine that writes it: the second
+engine wins when both write, and a pin that nobody writes holds.
 
 On the dev board, wire the RP2040 (or any SPI master, clk >= 8x SCK) to
 `SPI_SCK/CS_N/MOSI` on `ui[2:0]` and `SPI_MISO` on `uo[0]`, then:

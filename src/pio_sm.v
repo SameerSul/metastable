@@ -508,4 +508,27 @@ module pio_sm (
     end
   end
 
+`ifdef FORMAL
+  // Formal properties (yosys-smtbmc, see formal/run.sh), proved for every
+  // instruction word, every configuration and every input: the program,
+  // the pins and the FIFO flags are all free.
+  reg f_past_valid = 1'b0;
+  always @(posedge clk) f_past_valid <= 1'b1;
+  always @* if (!f_past_valid) assume (!rst_n);
+
+  always @* begin
+    // The engine never pops an empty TX FIFO and never pushes into a full
+    // RX FIFO: it stalls, or a non-blocking PUSH or PULL takes the other
+    // branch. This holds in reset as well.
+    if (tx_pop)  assert (!tx_empty);
+    if (rx_push) assert (!rx_full);
+    // The shift counters stay in 0..8, whatever bit count an IN or an OUT
+    // names and whatever the thresholds are.
+    if (f_past_valid && rst_n) begin
+      assert (osr_cnt <= 4'd8);
+      assert (isr_cnt <= 4'd8);
+    end
+  end
+`endif
+
 endmodule

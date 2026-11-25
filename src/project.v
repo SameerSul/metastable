@@ -361,4 +361,47 @@ module tt_um_sulems6_metastable (
 
   wire _unused = &{ena, 1'b0};
 
+`ifdef FORMAL_TOP
+  // Formal properties of the pin router (yosys-smtbmc, see formal/run.sh),
+  // proved with the whole design around it: both engines, any program and
+  // any traffic from the host. For each of the 16 pins, and the same for
+  // its direction:
+  //   - when the second engine writes the pin, the pin takes its value,
+  //     whether or not the first engine writes it too;
+  //   - when only the first engine writes it, the pin takes that value;
+  //   - when neither writes it, the pin holds.
+  // FORMAL_TOP is a name of its own, so that this proof does not prove
+  // the blocks' own properties (FORMAL) again.
+  reg        f_past_valid = 1'b0;
+  reg        f_rst_n;
+  reg [15:0] f_pm0, f_pm1, f_pd0, f_pd1, f_out;
+  reg [15:0] f_dm0, f_dm1, f_dd0, f_dd1, f_oe;
+  always @(posedge clk) begin
+    f_past_valid <= 1'b1;
+    f_rst_n <= rst_n;
+    f_pm0 <= pmask[0]; f_pd0 <= pdata[0];
+    f_pm1 <= pmask[1]; f_pd1 <= pdata[1];
+    f_dm0 <= dmask[0]; f_dd0 <= ddata[0];
+    f_dm1 <= dmask[1]; f_dd1 <= ddata[1];
+    f_out <= gpio_out_q;
+    f_oe  <= gpio_oe_q;
+  end
+  always @* if (!f_past_valid) assume (!rst_n);
+
+  generate
+    for (g = 0; g < 16; g = g + 1) begin : f_pin
+      always @* begin
+        if (f_past_valid && f_rst_n) begin
+          if (f_pm1[g])      assert (gpio_out_q[g] == f_pd1[g]);
+          else if (f_pm0[g]) assert (gpio_out_q[g] == f_pd0[g]);
+          else               assert (gpio_out_q[g] == f_out[g]);
+          if (f_dm1[g])      assert (gpio_oe_q[g] == f_dd1[g]);
+          else if (f_dm0[g]) assert (gpio_oe_q[g] == f_dd0[g]);
+          else               assert (gpio_oe_q[g] == f_oe[g]);
+        end
+      end
+    end
+  endgenerate
+`endif
+
 endmodule
