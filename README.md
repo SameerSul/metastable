@@ -124,7 +124,13 @@ covers:
   contents, stall-park points) and one over the pin datapath (pins,
   pindirs, optional/non-optional side-set decoded from the raw
   instruction word, JMP PIN, random pin-base configs across the 16-pin
-  space, GPIO readback compared bit-exactly)
+  space, GPIO readback compared bit-exactly). Both suites also draw WAIT,
+  the computed jumps (OUT PC, MOV PC), MOV EXEC, the IRQ that waits, and
+  delays. A push runs 12 + 8 seeds. A scheduled job runs 120 + 80 and
+  requires a coverage table with no empty cell
+  ([test/cosim_coverage.py](test/cosim_coverage.py)): 105 cells, one for
+  each operand value of the instruction set and for each outcome of an
+  instruction that can stall
 - **SPI host-interface fuzz** — random read/write bursts interleaved
   with transfers aborted by CS_N mid-byte at random bit offsets, checked
   against a reference model: only fully clocked bytes commit

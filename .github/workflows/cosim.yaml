@@ -1,0 +1,54 @@
+name: cosim
+# 200 constrained-random seeds against the golden model (test/golden.py),
+# and a coverage table that must have no empty cell. A push runs 20 seeds
+# in the test workflow; this job runs the long version once a week and
+# on request.
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+jobs:
+  cosim:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install iverilog
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y iverilog
+
+      - name: Setup python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install Python packages
+        shell: bash
+        run: pip install -r test/requirements.txt
+
+      - name: Run 120 + 80 seeds
+        shell: bash
+        env:
+          COSIM_ARCH_SEEDS: 120
+          COSIM_PIN_SEEDS: 80
+          COCOTB_TEST_FILTER: test_random_cosim
+        run: |
+          cd test
+          make clean
+          make
+          # make will return success even if the tests fail, so check results.xml for failed tests
+          python -m cocotb_tools.check_results results.xml
+
+      - name: Coverage table
+        shell: bash
+        run: python test/cosim_coverage.py --check | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: upload the coverage files
+        if: success() || failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cosim-coverage
+          path: test/cosim_coverage_*.json

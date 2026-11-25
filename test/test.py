@@ -2,6 +2,10 @@
 # Copyright (c) 2026 Sameer Suleman
 # SPDX-License-Identifier: Apache-2.0
 
+import collections
+import json
+import os
+
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles
@@ -41,6 +45,21 @@ async def configure(spi, writes):
     """Apply the register writes of an example: a list of (address, value)."""
     for addr, value in writes:
         await spi.write(addr, value)
+
+
+# How many seeds the two constrained-random tests run. A push runs 12 and
+# 8. The scheduled job runs 120 and 80, and then checks the coverage
+# table (cosim_coverage.py).
+ARCH_SEEDS = int(os.environ.get("COSIM_ARCH_SEEDS", "12"))
+PIN_SEEDS = int(os.environ.get("COSIM_PIN_SEEDS", "8"))
+
+
+def save_coverage(name, seeds, resampled, steps, cells):
+    """What one constrained-random test executed, for cosim_coverage.py."""
+    with open("cosim_coverage_%s.json" % name, "w") as f:
+        json.dump({"seeds": seeds, "resampled": resampled, "steps": steps,
+                   "cells": dict(sorted(cells.items()))}, f, indent=1)
+        f.write("\n")
 
 
 async def setup(dut):
@@ -607,14 +626,16 @@ async def test_random_cosim(dut):
     """Constrained-random ISA verification against a golden model.
 
     Each seed generates a random program over the architectural subset
-    (shifts, FIFOs, scratch ops, flow control, IRQ flags) plus random
+    (shifts, FIFOs, scratch ops, flow control, IRQ flags, WAIT on a
+    flag, computed jumps, MOV EXEC, delays) plus random
     SHIFTCTRL/THRESH/STATUS_CFG and a random TX FIFO preload, runs it to
     its park point in both the golden model (test/golden.py) and the
     silicon RTL, then compares PC, IRQ flags, and the exact RX FIFO
     contents (which fold in X/Y through the dump epilogue).
     """
     spi = await setup(dut)
-    for seed in range(12):
+    cells, resampled, total_steps = collections.Counter(), 0, 0
+    for seed in range(ARCH_SEEDS):
         prog, cfg, tx, g, steps, used_seed = random_case(seed)
 
         # halt SM0 and reset its state; restart also flushes the FIFOs
@@ -631,7 +652,8 @@ async def test_random_cosim(dut):
             await spi.write(SM(0) + TXF, tx)  # preload, then enable w/o restart
         await spi.write(R_CTRL, 0x01)
 
-        await ClockCycles(dut.clk, 2200)  # bounded: model parked < 2000 steps
+        # one tick a clock cycle: the model counts the ticks it needs
+        await ClockCycles(dut.clk, g.ticks + 200)
 
         # freeze before inspecting: draining RX could unstall a blocked PUSH
         await spi.write(R_CTRL, 0x00)
@@ -646,9 +668,13 @@ async def test_random_cosim(dut):
         assert rx == g.rx, f"seed {used_seed}: RX {rx} != {g.rx}"
         assert irq == exp_irq, f"seed {used_seed}: IRQ {irq:#x} != {exp_irq:#x}"
         await spi.write(R_IRQ, 0x0F)  # W1C for the next seed
+        cells.update(g.cov)  # counted only once the hardware agrees
+        resampled += used_seed != seed
+        total_steps += steps
         dut._log.info(
             f"cosim seed {used_seed}: {steps} steps, pc={pc}, "
             f"rx={len(rx)} bytes, irq={irq:#x} OK")
+    save_coverage("arch", ARCH_SEEDS, resampled, total_steps, cells)
 
 
 @cocotb.test()
@@ -908,9 +934,10 @@ async def test_spi_fuzz(dut):
 @cocotb.test()
 async def test_random_cosim_pins(dut):
     """Constrained-random cosim over the pin datapath: random programs
-    with SET/OUT/MOV to pins and pindirs, IN/MOV from pins, JMP PIN and
-    random side-set bits (optional and non-optional), random pin base
-    configs across the whole 16-pin space. Runs at divider 8 so the pad
+    with SET/OUT/MOV to pins and pindirs, IN/MOV from pins, JMP PIN,
+    WAIT on a pin, computed jumps, MOV EXEC, delays and random side-set
+    bits (optional and non-optional), random pin base configs across the
+    whole 16-pin space. Runs at divider 8 so the pad
     loopback + 2FF sync settle between ticks; pin state carries across
     seeds like the real project-level registers do. Compares PC, RX FIFO
     contents and the GPIO_IN readback against the golden model.
@@ -930,7 +957,8 @@ async def test_random_cosim_pins(dut):
         await spi.write(R_CTRL, 0x00)
 
     pins = dirs = 0
-    for seed in range(8):
+    cells, resampled, total_steps = collections.Counter(), 0, 0
+    for seed in range(PIN_SEEDS):
         prog, cfg, tx, g, steps, used_seed = random_case_pins(
             seed, pins, dirs)
 
@@ -956,7 +984,7 @@ async def test_random_cosim_pins(dut):
             await spi.write(SM(0) + TXF, tx)
         await spi.write(R_CTRL, 0x01)
 
-        await ClockCycles(dut.clk, (steps + 60) * 8)
+        await ClockCycles(dut.clk, (g.ticks + 60) * 8)
 
         await spi.write(R_CTRL, 0x00)
         pc = (await spi.read(R_PC0, 1))[0]
@@ -973,9 +1001,13 @@ async def test_random_cosim_pins(dut):
             f"seed {used_seed}: GPIO_IN {gin:#06x} != {exp_gin:#06x} "
             f"(pins {g.pins:#06x} dirs {g.dirs:#06x})")
         pins, dirs = g.pins, g.dirs  # pad latches persist across seeds
+        cells.update(g.cov)  # counted only once the hardware agrees
+        resampled += used_seed != seed
+        total_steps += steps
         dut._log.info(
             f"pin cosim seed {used_seed}: {steps} steps, pc={pc}, "
             f"rx={len(rx)}, gpio_in={gin:#06x} OK")
+    save_coverage("pins", PIN_SEEDS, resampled, total_steps, cells)
 
 
 @cocotb.test()
