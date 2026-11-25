@@ -68,7 +68,10 @@ Verification has three legs: a directed cocotb suite with eight protocol
 demos and ISA corner coverage, constrained-random co-simulation against a
 golden architectural model, and formal proofs.
 
-The cocotb suite ([test/test.py](test/test.py)) covers:
+Every protocol demo has an example file in [sw/examples](sw/examples),
+and a test that loads the program and the register settings from that
+file, so the suite checks the programs that ship. The cocotb suite
+([test/test.py](test/test.py)) covers:
 
 - **UART loopback** — SM0 transmits 8N1 frames on GPIO0, SM1 receives them
   on the same pin through the pin router

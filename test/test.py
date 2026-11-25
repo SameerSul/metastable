@@ -8,25 +8,39 @@ from cocotb.triggers import ClockCycles
 
 from metastable import (
     SPI_HALF, SpiHost, uio_loopback, I2CSlave, WS2812Decoder, UsbLsDecoder,
-    usb_ls_packet_symbols, usb_symbols_to_bytes, usb_crc16,
-    Ps2Host, ps2_frame_bytes, nec_transmit, side,
+    usb_crc16, Ps2Host, nec_transmit, side,
     SpiMonitor, I2CTarget, I2C_SPEC_NS,
     JMP, WAIT, IN_, OUT, PUSH, PULL, MOV, IRQ, SET,
     SRC_PINS, SRC_X, SRC_Y, SRC_NULL, SRC_STATUS, SRC_OSR,
-    ODST_PINS, ODST_X, ODST_NULL, ODST_PINDIRS, ODST_PC, ODST_ISR,
-    MDST_X, MDST_Y, MDST_EXEC, MDST_ISR, M_INV, M_REV,
+    ODST_PINS, ODST_NULL, ODST_PC, ODST_ISR,
+    MDST_X, MDST_EXEC, MDST_ISR, M_INV, M_REV,
     SDST_PINS, SDST_PINDIRS, SDST_X, SDST_Y,
-    C_NOTX, C_XDEC, C_YDEC, C_XNEY, C_PIN, C_NOTOSRE, W_PIN, W_GPIO, W_IRQ,
+    C_XDEC, C_YDEC, C_XNEY, C_PIN, C_NOTOSRE, W_GPIO, W_IRQ,
     R_CTRL, R_FSTAT, R_IRQ, R_IRQ_MASK, R_GPIO_IN_L, R_GPIO_IN_H, R_PC0,
     R_FLEVEL0, SM,
     CLKDIV_INT_L, CLKDIV_FRAC, WRAP_TOP, WRAP_BOTTOM, SHIFTCTRL, THRESH,
     PIN_OUT, PIN_SET, PIN_IN, PIN_SIDE, JMP_PIN,
-    AUTOPULL, AUTOPUSH, OUT_RIGHT, IN_RIGHT, SIDE_OPT, SIDE_PINDIR,
+    AUTOPULL, AUTOPUSH, SIDE_OPT,
     TXF, RXF, STATUS_CFG, STATUS_RX,
 )
 from golden import random_case, random_case_pins
-import spi_modes
+import capture_replay
 import i2c_read
+import i2c_write
+import manchester
+import nec_ir_receive
+import ps2_device
+import spi_modes
+import two_protocols
+import uart_loopback
+import usb_ls_tx
+import ws2812
+
+
+async def configure(spi, writes):
+    """Apply the register writes of an example: a list of (address, value)."""
+    for addr, value in writes:
+        await spi.write(addr, value)
 
 
 async def setup(dut):
@@ -77,43 +91,11 @@ async def test_uart_loopback(dut):
     spi = await setup(dut)
     cocotb.start_soon(uio_loopback(dut))
 
-    # UART TX, 8N1, LSB first, 8 ticks/bit, TX = GPIO0 (SET + OUT pins)
-    tx_prog = [
-        SET(SDST_PINDIRS, 1),             # 0: GPIO0 output
-        SET(SDST_PINS, 1),                # 1: line idle high
-        PULL(block=1),                    # 2: stall (idle) until data
-        SET(SDST_X, 7),                   # 3: bit counter
-        SET(SDST_PINS, 0, delay=7),       # 4: start bit, 8 ticks
-        OUT(ODST_PINS, 1),                # 5: shift one data bit
-        JMP(5, C_XDEC, delay=6),          # 6: 8 ticks per bit
-        SET(SDST_PINS, 1, delay=6),       # 7: stop bit, then wrap
-    ]
-    # UART RX on GPIO0, samples mid-bit
-    RX0 = 8
-    rx_prog = [
-        WAIT(0, W_PIN, 0),           # 8: start bit edge
-        SET(SDST_X, 7, delay=10),    # 9: align to centre of data bit 0
-        IN_(SRC_PINS, 1),            # 10:
-        JMP(10, C_XDEC, delay=6),    # 11: 8 ticks per bit
-        WAIT(1, W_PIN, 0),           # 12: wait for stop bit (no false start)
-        PUSH(block=0),               # 13:
-    ]
-
-    await spi.load_program(0, tx_prog)
-    await spi.load_program(RX0, rx_prog)
-
-    # SM0: divider 2, wrap 0..7, out 1 pin @0, set 1 pin @0
-    await spi.write(SM(0) + CLKDIV_INT_L, 2)
-    await spi.write(SM(0) + WRAP_TOP, 7)
-    await spi.write(SM(0) + WRAP_BOTTOM, 0)
-    await spi.write(SM(0) + PIN_OUT, 0x10)   # base 0, count 1
-    await spi.write(SM(0) + PIN_SET, 0x10)   # base 0, count 1
-
-    # SM1: divider 2, wrap 8..13, in base 0
-    await spi.write(SM(1) + CLKDIV_INT_L, 2)
-    await spi.write(SM(1) + WRAP_TOP, 13)
-    await spi.write(SM(1) + WRAP_BOTTOM, RX0)
-    await spi.write(SM(1) + PIN_IN, 0)
+    # the programs and settings of sw/examples/uart_loopback.py: 8N1, LSB
+    # first, 8 ticks a bit, transmitter on SM0 and receiver on SM1
+    await spi.load_program(0, uart_loopback.TX_PROG)
+    await spi.load_program(uart_loopback.RX0, uart_loopback.RX_PROG)
+    await configure(spi, uart_loopback.config(clkdiv=2))
 
     # start SM0 first so the line is idle high before the receiver arms
     await spi.write(R_CTRL, 0x11)  # SM0 enable + restart
@@ -226,36 +208,9 @@ async def test_i2c_master(dut):
     slave = I2CSlave(dut)
     cocotb.start_soon(slave.run())
 
-    OPT = True
-    LO = side(1, 1, OPT)  # SCL dir=1: drive low
-    HI = side(0, 1, OPT)  # SCL dir=0: release high
-    prog = [
-        SET(SDST_PINDIRS, 0),                    # 0: SDA released (bus idle)
-        PULL(block=1),                           # 1: wait for first byte
-        SET(SDST_PINDIRS, 1, delay=7),           # 2: START: SDA low, SCL high
-        SET(SDST_Y, 1),                          # 3: byte count - 1
-        SET(SDST_X, 7, side=LO, delay=1),        # 4: SCL low, bit counter
-        OUT(ODST_PINDIRS, 1, side=LO, delay=3),  # 5: SDA <= bit (autopull)
-        JMP(5, C_XDEC, side=HI, delay=3),        # 6: SCL high, slave samples
-        SET(SDST_PINDIRS, 0, side=LO, delay=3),  # 7: release SDA for ACK
-        IN_(SRC_PINS, 1, side=HI, delay=3),      # 8: sample ACK on SCL rise
-        JMP(4, C_YDEC, side=LO, delay=1),        # 9: next byte
-        SET(SDST_PINDIRS, 1, side=LO, delay=3),  # 10: SDA low ahead of STOP
-        MOV(MDST_Y, SRC_Y, side=HI, delay=3),    # 11: SCL high, SDA held low
-        SET(SDST_PINDIRS, 0, delay=7),           # 12: STOP: SDA rises
-        PUSH(block=0),                           # 13: ACK bits -> host
-    ]
-    await spi.load_program(0, prog)
-
-    await spi.write(SM(0) + CLKDIV_INT_L, 8)
-    await spi.write(SM(0) + WRAP_TOP, 13)
-    await spi.write(SM(0) + WRAP_BOTTOM, 0)
-    await spi.write(SM(0) + SHIFTCTRL, AUTOPULL)  # shift left, MSB first
-    await spi.write(SM(0) + PIN_OUT, 0x10)        # SDA: base 0, count 1
-    await spi.write(SM(0) + PIN_SET, 0x10)        # SDA: base 0, count 1
-    await spi.write(SM(0) + PIN_IN, 0)            # SDA
-    # SCL: base 1, count 1, optional, drives pindirs
-    await spi.write(SM(0) + PIN_SIDE, SIDE_PINDIR | SIDE_OPT | 0x11)
+    # the program and settings of sw/examples/i2c_write.py: two bytes
+    await spi.load_program(0, i2c_write.PROG)
+    await configure(spi, i2c_write.config(clkdiv=8))
 
     await spi.write(R_CTRL, 0x11)   # SM0 enable + restart (flushes FIFOs)
     wire_bytes = [0xA4, 0x57]       # address 0x52 + W, one data byte
@@ -548,48 +503,20 @@ async def test_manchester(dut):
     spi = await setup(dut)
     cocotb.start_soon(uio_loopback(dut))
 
-    OPT = True
-    LO, HI = side(0, 1, OPT), side(1, 1, OPT)
-    tx_prog = [
-        SET(SDST_PINDIRS, 1),                  # 0: GPIO0 output, idle low
-        OUT(ODST_X, 1),                        # 1: next bit (autopull)
-        JMP(5, C_NOTX),                        # 2: 0 -> falling symbol
-        MOV(MDST_Y, SRC_Y, side=LO, delay=3),  # 3: '1': low half
-        JMP(1, side=HI, delay=1),              # 4:      high half (+1,2)
-        MOV(MDST_Y, SRC_Y, side=HI, delay=3),  # 5: '0': high half
-        JMP(1, side=LO, delay=1),              # 6:      low half (+1,2)
-    ]
-    RX0 = 8
-    rx_prog = [
-        WAIT(1, W_GPIO, 0),                    # 8: first mid-bit rising edge
-        IN_(SRC_PINS, 1, delay=6),             # 9: sample 2nd half of bit
-        JMP(9),                                # 10: 8 ticks per bit
-    ]
-    await spi.load_program(0, tx_prog)
-    await spi.load_program(RX0, rx_prog)
-
-    # div 8: one byte on the wire (512 clk) outlasts a host FIFO write
-    await spi.write(SM(0) + CLKDIV_INT_L, 8)
-    await spi.write(SM(0) + WRAP_TOP, 6)
-    await spi.write(SM(0) + WRAP_BOTTOM, 0)
-    await spi.write(SM(0) + SHIFTCTRL, AUTOPULL)      # MSB first
-    await spi.write(SM(0) + PIN_SET, 0x10)            # GPIO0 dir
-    await spi.write(SM(0) + PIN_SIDE, SIDE_OPT | 0x10)  # GPIO0 value
-
-    await spi.write(SM(1) + CLKDIV_INT_L, 8)
-    await spi.write(SM(1) + WRAP_TOP, 10)
-    await spi.write(SM(1) + WRAP_BOTTOM, RX0)
-    await spi.write(SM(1) + SHIFTCTRL, AUTOPUSH)      # MSB first
-    await spi.write(SM(1) + PIN_IN, 0)
+    # the programs and settings of sw/examples/manchester.py. At divider
+    # 8 one byte on the wire (512 clk) outlasts a host FIFO write.
+    await spi.load_program(0, manchester.TX_PROG)
+    await spi.load_program(manchester.RX0, manchester.RX_PROG)
+    await configure(spi, manchester.config(clkdiv=8))
 
     await spi.write(R_CTRL, 0x33)
     payload = [0x0F, 0x96, 0x55, 0xC3]
-    for b in [0xAA] + payload:  # preamble syncs the receiver
+    for b in [manchester.PREAMBLE] + payload:  # preamble syncs the receiver
         await spi.write(SM(0) + TXF, b)
 
     # the receiver free-runs after the frame, so only the first bytes count
     got = await drain_rx(spi, dut, 1, 5)
-    exp = [0xAA] + payload
+    exp = [manchester.PREAMBLE] + payload
     assert got == exp, f"Manchester RX {got} != {exp}"
 
 
@@ -607,24 +534,9 @@ async def test_ws2812(dut):
     dec = WS2812Decoder(dut)
     cocotb.start_soon(dec.run())
 
-    S0, S1 = side(0, 1), side(1, 1)
-    prog = [
-        SET(SDST_PINDIRS, 1),                    # 0: once: GPIO0 output
-        OUT(ODST_X, 1, delay=2, side=S0),        # 1: bitloop: low tail (T3)
-        JMP(4, C_NOTX, delay=2, side=S1),        # 2: high leader (T1)
-        JMP(1, delay=3, side=S1),                # 3: '1': stay high (T2)
-        SET(SDST_PINDIRS, 1, delay=1, side=S0),  # 4: '0': low (pindir refresh)
-        JMP(1, delay=1, side=S0),                # 5: '0': low, next bit
-    ]
-    await spi.load_program(0, prog)
-
-    await spi.write(SM(0) + CLKDIV_INT_L, 6)
-    await spi.write(SM(0) + CLKDIV_FRAC, 64)     # 50 MHz / 6.25 = 8 MHz
-    await spi.write(SM(0) + WRAP_TOP, 5)
-    await spi.write(SM(0) + WRAP_BOTTOM, 0)
-    await spi.write(SM(0) + SHIFTCTRL, AUTOPULL)  # MSB first, 8-bit refill
-    await spi.write(SM(0) + PIN_SET, 0x10)       # base 0, count 1
-    await spi.write(SM(0) + PIN_SIDE, 0x10)      # base 0, count 1, always on
+    # the program and settings of sw/examples/ws2812.py
+    await spi.load_program(0, ws2812.PROG)
+    await configure(spi, ws2812.config())
 
     await spi.write(R_CTRL, 0x11)
 
@@ -656,26 +568,14 @@ async def test_usb_ls_tx(dut):
     dec = UsbLsDecoder(dut)
     cocotb.start_soon(dec.run())
 
-    prog = [
-        SET(SDST_PINS, 2),               # 0: idle J (D- high, D+ low)
-        SET(SDST_PINDIRS, 3),            # 1: drive both lines
-        OUT(ODST_PINS, 2, delay=6),      # 2: one symbol per 8 ticks
-        JMP(2),                          # 3:
-    ]
-    await spi.load_program(0, prog)
-
-    await spi.write(SM(0) + CLKDIV_INT_L, 4)
-    await spi.write(SM(0) + CLKDIV_FRAC, 43)          # 1.5 MHz bit clock
-    await spi.write(SM(0) + WRAP_TOP, 31)
-    await spi.write(SM(0) + WRAP_BOTTOM, 0)
-    await spi.write(SM(0) + SHIFTCTRL, AUTOPULL | OUT_RIGHT)
-    await spi.write(SM(0) + PIN_SET, 0x20)            # base 0, count 2
-    await spi.write(SM(0) + PIN_OUT, 0x20)            # base 0, count 2
+    # the program and settings of sw/examples/usb_ls_tx.py
+    await spi.load_program(0, usb_ls_tx.PROG)
+    await configure(spi, usb_ls_tx.config())
     await spi.write(R_CTRL, 0x11)
 
     payload = [0xFF, 0x3F, 0x00, 0xA5]  # 0xFF forces a stuffed bit
-    pid = 0xC3                          # DATA0
-    stream = usb_symbols_to_bytes(usb_ls_packet_symbols(pid, payload))
+    pid = usb_ls_tx.PID_DATA0
+    stream = usb_ls_tx.packet_bytes(pid, payload)
 
     # burst-fill the FIFO, then stream the rest at SCK = clk/8: one
     # 2-byte write is ~140 clk vs 133 clk consumed per symbol byte
@@ -761,50 +661,19 @@ async def test_concurrent_protocols(dut):
     """
     spi = await setup(dut)
     usb = UsbLsDecoder(dut)
-    led = WS2812Decoder(dut, pin=4)
+    led = WS2812Decoder(dut, pin=two_protocols.WS_PIN)
     cocotb.start_soon(usb.run())
     cocotb.start_soon(led.run())
 
-    S0, S1 = side(0, 1), side(1, 1)
-    usb_prog = [
-        SET(SDST_PINS, 2),               # 0: idle J
-        SET(SDST_PINDIRS, 3),            # 1: drive D+/D-
-        OUT(ODST_PINS, 2, delay=6),      # 2: one symbol per 8 ticks
-        JMP(2),                          # 3:
-    ]
-    WS0 = 8
-    ws_prog = [
-        SET(SDST_PINDIRS, 1),                    # 8: GPIO4 output
-        OUT(ODST_X, 1, delay=2, side=S0),        # 9: bitloop
-        JMP(12, C_NOTX, delay=2, side=S1),       # 10:
-        JMP(9, delay=3, side=S1),                # 11: '1'
-        SET(SDST_PINDIRS, 1, delay=1, side=S0),  # 12: '0'
-        JMP(9, delay=1, side=S0),                # 13:
-    ]
-    await spi.load_program(0, usb_prog)
-    await spi.load_program(WS0, ws_prog)
-
-    # SM0: USB LS on GPIO0/1
-    await spi.write(SM(0) + CLKDIV_INT_L, 4)
-    await spi.write(SM(0) + CLKDIV_FRAC, 43)
-    await spi.write(SM(0) + WRAP_TOP, 7)
-    await spi.write(SM(0) + WRAP_BOTTOM, 0)
-    await spi.write(SM(0) + SHIFTCTRL, AUTOPULL | OUT_RIGHT)
-    await spi.write(SM(0) + PIN_SET, 0x20)
-    await spi.write(SM(0) + PIN_OUT, 0x20)
-
-    # SM1: WS2812 on GPIO4
-    await spi.write(SM(1) + CLKDIV_INT_L, 6)
-    await spi.write(SM(1) + CLKDIV_FRAC, 64)
-    await spi.write(SM(1) + WRAP_TOP, 31)
-    await spi.write(SM(1) + WRAP_BOTTOM, WS0)
-    await spi.write(SM(1) + SHIFTCTRL, AUTOPULL)
-    await spi.write(SM(1) + PIN_SET, 0x14)   # base 4, count 1
-    await spi.write(SM(1) + PIN_SIDE, 0x14)  # base 4, count 1
+    # the programs and settings of sw/examples/two_protocols.py: USB LS
+    # on GPIO0/1 from SM0, WS2812 on GPIO4 from SM1
+    await spi.load_program(two_protocols.USB_ORIGIN, two_protocols.USB_PROG)
+    await spi.load_program(two_protocols.WS_ORIGIN, two_protocols.WS_PROG)
+    await configure(spi, two_protocols.config())
 
     payload = [0x0F, 0x99]
-    pid = 0xC3
-    stream = usb_symbols_to_bytes(usb_ls_packet_symbols(pid, payload))
+    pid = usb_ls_tx.PID_DATA0
+    stream = usb_ls_tx.packet_bytes(pid, payload)
     grb = [0x10, 0xFF, 0x08, 0x00, 0x40, 0xC3]  # two LEDs
 
     # WS2812 frame fits the 8-deep FIFO: preload it whole, then start
@@ -844,30 +713,15 @@ async def test_ps2_device(dut):
     host = Ps2Host(dut)
     cocotb.start_soon(host.run())
 
-    H, L = side(1, 1), side(0, 1)
-    prog = [
-        SET(SDST_PINDIRS, 3, side=H),        # 0: DATA + CLK outputs
-        SET(SDST_PINS, 3, side=H),           # 1: idle high
-        PULL(block=1, side=H),               # 2: wait for a frame
-        SET(SDST_X, 10, side=H),             # 3: 11 bits
-        OUT(ODST_PINS, 1, delay=7, side=H),  # 4: data setup, CLK high
-        JMP(4, C_XDEC, delay=7, side=L),     # 5: CLK low, host samples
-        JMP(2, side=H),                      # 6: frame done, CLK high
-    ]
-    await spi.load_program(0, prog)
-
-    await spi.write(SM(0) + CLKDIV_INT_L, 250)  # 5 us tick, 80 us/bit
-    await spi.write(SM(0) + WRAP_TOP, 31)
-    await spi.write(SM(0) + WRAP_BOTTOM, 0)
-    await spi.write(SM(0) + SHIFTCTRL, AUTOPULL | OUT_RIGHT)
-    await spi.write(SM(0) + PIN_OUT, 0x10)   # DATA: base 0, count 1
-    await spi.write(SM(0) + PIN_SET, 0x20)   # base 0, count 2
-    await spi.write(SM(0) + PIN_SIDE, 0x11)  # CLK: base 1, count 1
+    # the program and settings of sw/examples/ps2_device.py: a 5 us
+    # tick, 80 us a bit
+    await spi.load_program(0, ps2_device.PROG)
+    await configure(spi, ps2_device.config(clkdiv=250))
     await spi.write(R_CTRL, 0x11)
 
     scancodes = [0x1C, 0xF0]  # 'A' make, break prefix
     for code in scancodes:
-        await spi.write(SM(0) + TXF, ps2_frame_bytes(code))
+        await spi.write(SM(0) + TXF, ps2_device.frame_bytes(code))
 
     # 2 frames x 11 bits x 80 us = 1.76 ms
     await ClockCycles(dut.clk, 100000)
@@ -892,31 +746,11 @@ async def test_capture_replay(dut):
     spi = await setup(dut)
     cocotb.start_soon(uio_loopback(dut))
 
-    # SM0: sampler, 2 ticks per sample
-    cap_prog = [
-        IN_(SRC_PINS, 4),  # 0
-        JMP(0),            # 1
-    ]
-    # SM1: waveform replayer, 2 ticks per symbol
-    AWG = 8
-    awg_prog = [
-        SET(SDST_PINDIRS, 0xF),  # 8: GPIO4-7 outputs
-        OUT(ODST_PINS, 4),       # 9
-        JMP(9),                  # 10
-    ]
-    await spi.load_program(0, cap_prog)
-    await spi.load_program(AWG, awg_prog)
-
-    for sm in (0, 1):
-        await spi.write(SM(sm) + CLKDIV_INT_L, 16)
-        await spi.write(SM(sm) + WRAP_TOP, 31)
-    await spi.write(SM(0) + WRAP_BOTTOM, 0)
-    await spi.write(SM(1) + WRAP_BOTTOM, AWG)
-    await spi.write(SM(0) + SHIFTCTRL, AUTOPUSH)  # 2 samples/byte, MSB first
-    await spi.write(SM(0) + PIN_IN, 4)
-    await spi.write(SM(1) + SHIFTCTRL, AUTOPULL)  # 2 symbols/byte, MSB first
-    await spi.write(SM(1) + PIN_OUT, 0x44)        # base 4, count 4
-    await spi.write(SM(1) + PIN_SET, 0x44)        # base 4, count 4
+    # the programs and settings of sw/examples/capture_replay.py: SM0
+    # samples and SM1 replays, 2 ticks a sample
+    await spi.load_program(0, capture_replay.CAP_PROG)
+    await spi.load_program(capture_replay.AWG0, capture_replay.AWG_PROG)
+    await configure(spi, capture_replay.config(div=16))
 
     wave = [0x1, 0x3, 0x7, 0xF, 0xE, 0xC, 0x8, 0x0,
             0x5, 0xA, 0x5, 0xA, 0x9, 0x6, 0x3, 0xC]
@@ -971,24 +805,10 @@ async def test_nec_ir_receive(dut):
     """
     spi = await setup(dut)
 
-    prog = [
-        WAIT(0, W_PIN, 0),            # 0: leader burst
-        WAIT(1, W_PIN, 0),            # 1: leader gap begins
-        SET(SDST_X, 31),              # 2: 32 data bits
-        WAIT(0, W_PIN, 0),            # 3: bit burst
-        WAIT(1, W_PIN, 0, delay=20),  # 4: sample 42 us after burst end:
-                                      #    mid-burst for '0', mid-gap for '1'
-        IN_(SRC_PINS, 1),             # 5: high = long gap = '1'
-        JMP(3, C_XDEC),               # 6:
-        JMP(7),                       # 7: park
-    ]
-    await spi.load_program(0, prog)
-
-    await spi.write(SM(0) + CLKDIV_INT_L, 100)  # 2 us tick at the 20x scale
-    await spi.write(SM(0) + WRAP_TOP, 31)
-    await spi.write(SM(0) + WRAP_BOTTOM, 0)
-    await spi.write(SM(0) + SHIFTCTRL, AUTOPUSH | IN_RIGHT)  # LSB first
-    await spi.write(SM(0) + PIN_IN, 8)                       # GPIO8 = ui[3]
+    # the program and settings of sw/examples/nec_ir_receive.py, with
+    # the divider scaled like the timing: a 2 us tick
+    await spi.load_program(0, nec_ir_receive.PROG)
+    await configure(spi, nec_ir_receive.config(clkdiv=100))
     # idle the IR line high before enabling, or WAIT(0) fires on reset state
     dut.ui_in.value = int(dut.ui_in.value) | (1 << 3)
     await ClockCycles(dut.clk, 2)
@@ -1214,8 +1034,7 @@ async def spi_mode_case(dut, mode):
 
     await spi.load_program(spi_modes.MASTER_ORIGIN, spi_modes.master_program(mode))
     await spi.load_program(spi_modes.SLAVE_ORIGIN, spi_modes.slave_program(mode))
-    for addr, value in spi_modes.master_config() + spi_modes.slave_config(mode):
-        await spi.write(addr, value)
+    await configure(spi, spi_modes.master_config() + spi_modes.slave_config(mode))
 
     await spi.write(R_CTRL, 0x33)       # both enabled and restarted
     await ClockCycles(dut.clk, 60)      # the master waits at its PULL
@@ -1283,8 +1102,7 @@ async def i2c_read_start(dut, speed, **target):
     bus = I2CTarget(dut, **target)
     cocotb.start_soon(bus.run())
     await spi.load_program(0, i2c_read.PROG)
-    for addr, value in i2c_read.config(speed):
-        await spi.write(addr, value)
+    await configure(spi, i2c_read.config(speed))
     await spi.write(R_CTRL, 0x11)       # SM0 enabled and restarted
     return spi, bus
 

@@ -18,23 +18,36 @@ S0, S1 = side(0, 1), side(1, 1)
 
 # 8 MHz tick (divider 6+64/256), 10 ticks per bit:
 # '0' = 3 ticks high / 7 low, '1' = 7 high / 3 low.
-PROG = [
-    SET(SDST_PINDIRS, 1),                    # 0: once: GPIO0 output
-    OUT(ODST_X, 1, delay=2, side=S0),        # 1: bitloop: low tail (T3)
-    JMP(4, C_NOTX, delay=2, side=S1),        # 2: high leader (T1)
-    JMP(1, delay=3, side=S1),                # 3: '1': stay high (T2)
-    SET(SDST_PINDIRS, 1, delay=1, side=S0),  # 4: '0': low (pindir refresh)
-    JMP(1, delay=1, side=S0),                # 5: '0': low, next bit
-]
+def program(origin=0):
+    """The six instructions, for a program that starts at `origin`."""
+    return [
+        SET(SDST_PINDIRS, 1),                        # +0: once: the pin drives
+        OUT(ODST_X, 1, delay=2, side=S0),            # +1: bitloop: low tail (T3)
+        JMP(origin + 4, C_NOTX, delay=2, side=S1),   # +2: high leader (T1)
+        JMP(origin + 1, delay=3, side=S1),           # +3: '1': stay high (T2)
+        SET(SDST_PINDIRS, 1, delay=1, side=S0),      # +4: '0': low (pindir refresh)
+        JMP(origin + 1, delay=1, side=S0),           # +5: '0': low, next bit
+    ]
+
+
+PROG = program()
+
+
+def config(sm=0, pin=0, origin=0):
+    """The register writes, as (address, value) pairs: an 8 MHz tick
+    from the 50 MHz clock, most significant bit first, data on `pin`."""
+    return sm_config(sm, div_int=6, div_frac=64,            # 50 MHz / 6.25
+                     wrap_bottom=origin, wrap_top=origin + 5,
+                     shiftctrl=AUTOPULL,                     # 8-bit refill
+                     pin_set=0x10 | pin,                     # one pin
+                     pin_side=0x10 | pin)                    # always on
 
 
 def setup(host):
+    host.ctrl(0, 0)
     host.load_program(0, PROG)
-    host.set_clkdiv(0, 6, 64)          # 50 MHz / 6.25 = 8 MHz tick
-    host.set_wrap(0, 0, 5)
-    host.write(SM(0) + SHIFTCTRL, AUTOPULL)  # MSB first, 8-bit refill
-    host.write(SM(0) + PIN_SET, 0x10)  # base 0, count 1
-    host.write(SM(0) + PIN_SIDE, 0x10) # base 0, count 1, always on
+    for addr, value in config():
+        host.write(addr, value)
     host.enable(sm0=True)
 
 

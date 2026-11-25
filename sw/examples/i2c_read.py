@@ -88,21 +88,15 @@ PROG = [
 def config(speed=STANDARD, sm=0):
     """The register writes for one speed, as (address, value) pairs."""
     div_int, div_frac = speed
-    base = SM(sm)
-    return [
-        (base + CLKDIV_INT_L, div_int & 0xFF),
-        (base + CLKDIV_INT_H, (div_int >> 8) & 0xFF),
-        (base + CLKDIV_FRAC, div_frac),
-        (base + WRAP_BOTTOM, 0),
-        (base + WRAP_TOP, WRAP_TOP_ADDR),
-        (base + SHIFTCTRL, AUTOPUSH),             # shift left, most significant bit first
-        (base + PIN_OUT, 0x10 | SDA),             # SDA: one pin
-        (base + PIN_SET, 0x10 | SDA),
-        (base + PIN_IN, SDA),
-        (base + JMP_PIN, SDA),
-        # SCL: one pin, optional side-set, on the pin directions
-        (base + PIN_SIDE, SIDE_PINDIR | SIDE_OPT | 0x10 | SCL),
-    ]
+    return sm_config(sm, div_int=div_int, div_frac=div_frac,
+                     wrap_bottom=0, wrap_top=WRAP_TOP_ADDR,
+                     shiftctrl=AUTOPUSH,           # shift left, most significant bit first
+                     pin_out=0x10 | SDA,           # SDA: one pin
+                     pin_set=0x10 | SDA,
+                     pin_in=SDA,
+                     jmp_pin=SDA,
+                     # SCL: one pin, optional side-set, on the pin directions
+                     pin_side=SIDE_PINDIR | SIDE_OPT | 0x10 | SCL)
 
 
 def address_byte(addr7):

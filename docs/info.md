@@ -128,8 +128,9 @@ straightforward.
 MicroPython; `sw/metastable_host.py` is a register-level host driver for
 the demo board's RP2040 (bit-banged mode-0 SPI over `ui[2:0]`/`uo[0]`),
 and `sw/examples/uart_loopback.py` runs the UART demo on silicon. The
-cocotb suite imports the same assembler; `test/test.py` shows the full
-flow with the protocol demos:
+cocotb suite imports the same assembler. Every protocol demo below has
+an example file in `sw/examples`, and a test in `test/test.py` that
+loads the program and the register settings from that file:
 
 - **UART loopback**: SM0 runs an 8N1 transmitter on GPIO0, SM1 a
   receiver on the same pin; bytes pushed into SM0's TX FIFO over SPI

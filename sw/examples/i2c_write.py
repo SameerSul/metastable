@@ -40,17 +40,23 @@ PROG = [
 ]
 
 
+def config(clkdiv=63):
+    """The register writes, as (address, value) pairs. clkdiv 63 at
+    50 MHz gives ~99 kHz SCL (8 ticks per bit)."""
+    return sm_config(0, div_int=clkdiv, wrap_bottom=0, wrap_top=13,
+                     shiftctrl=AUTOPULL,          # shift left, MSB first
+                     pin_out=0x10,                # SDA: base 0, count 1
+                     pin_set=0x10,                # SDA: base 0, count 1
+                     pin_in=0,                    # SDA
+                     # SCL: base 1, count 1, optional side-set, drives pindirs
+                     pin_side=SIDE_PINDIR | SIDE_OPT | 0x11)
+
+
 def setup(host, clkdiv=63):
-    """clkdiv 63 at 50 MHz gives ~99 kHz SCL (8 ticks per bit)."""
+    host.ctrl(0, 0)
     host.load_program(0, PROG)
-    host.set_clkdiv(0, clkdiv)
-    host.set_wrap(0, 0, 13)
-    host.write(SM(0) + SHIFTCTRL, AUTOPULL)  # shift left, MSB first
-    host.write(SM(0) + PIN_OUT, 0x10)        # SDA: base 0, count 1
-    host.write(SM(0) + PIN_SET, 0x10)        # SDA: base 0, count 1
-    host.write(SM(0) + PIN_IN, 0)            # SDA
-    # SCL: base 1, count 1, optional side-set, drives pindirs
-    host.write(SM(0) + PIN_SIDE, SIDE_PINDIR | SIDE_OPT | 0x11)
+    for addr, value in config(clkdiv):
+        host.write(addr, value)
 
 
 def write_txn(host, addr7, data):

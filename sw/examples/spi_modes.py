@@ -92,36 +92,22 @@ def slave_program(mode):
 
 def master_config(sm=0, clkdiv=8, origin=MASTER_ORIGIN):
     """The master's register writes, as (address, value) pairs."""
-    base = SM(sm)
-    return [
-        (base + CLKDIV_INT_L, clkdiv & 0xFF),
-        (base + CLKDIV_INT_H, (clkdiv >> 8) & 0xFF),
-        (base + CLKDIV_FRAC, 0),
-        (base + WRAP_BOTTOM, origin),
-        (base + WRAP_TOP, origin + 5),
-        (base + SHIFTCTRL, AUTOPUSH),            # shift left, explicit PULL
-        (base + PIN_OUT, 0x10 | MOSI),           # MOSI: one pin
-        (base + PIN_SET, 0x20 | SCK),            # SCK and MOSI directions
-        (base + PIN_IN, MISO),
-        (base + PIN_SIDE, 0x10 | SCK),           # SCK: one side-set pin
-    ]
+    return sm_config(sm, div_int=clkdiv, wrap_bottom=origin, wrap_top=origin + 5,
+                     shiftctrl=AUTOPUSH,           # shift left, explicit PULL
+                     pin_out=0x10 | MOSI,          # MOSI: one pin
+                     pin_set=0x20 | SCK,           # SCK and MOSI directions
+                     pin_in=MISO,
+                     pin_side=0x10 | SCK)          # SCK: one side-set pin
 
 
 def slave_config(mode, sm=1, clkdiv=1, origin=SLAVE_ORIGIN):
     """The slave's register writes for one mode, as (address, value) pairs."""
-    base = SM(sm)
-    return [
-        (base + CLKDIV_INT_L, clkdiv & 0xFF),
-        (base + CLKDIV_INT_H, (clkdiv >> 8) & 0xFF),
-        (base + CLKDIV_FRAC, 0),
-        (base + WRAP_BOTTOM, origin),
-        (base + WRAP_TOP, origin + len(slave_program(mode)) - 1),
-        (base + SHIFTCTRL, AUTOPULL | AUTOPUSH),  # shift left
-        (base + PIN_OUT, 0x10 | MISO),            # MISO: one pin
-        (base + PIN_SET, 0x10 | MISO),            # MISO direction
-        (base + PIN_IN, MOSI),
-        (base + PIN_SIDE, 0),
-    ]
+    return sm_config(sm, div_int=clkdiv, wrap_bottom=origin,
+                     wrap_top=origin + len(slave_program(mode)) - 1,
+                     shiftctrl=AUTOPULL | AUTOPUSH,   # shift left
+                     pin_out=0x10 | MISO,             # MISO: one pin
+                     pin_set=0x10 | MISO,             # MISO direction
+                     pin_in=MOSI)
 
 
 def setup(host, mode, clkdiv=8):

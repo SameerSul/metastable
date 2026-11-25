@@ -22,18 +22,23 @@ AWG_PROG = [SET(SDST_PINDIRS, 0xF),              # at 8: GPIO4-7 outputs
             OUT(ODST_PINS, 4), JMP(AWG0 + 1)]    # 2 ticks/symbol
 
 
+def config(div=16):
+    """The register writes for both state machines, as (address, value)
+    pairs: SM0 samples GPIO4-7 and SM1 replays onto them, at one rate."""
+    return (sm_config(0, div_int=div, wrap_bottom=0, wrap_top=31,
+                      shiftctrl=AUTOPUSH,          # 2 samples/byte, MSB first
+                      pin_in=4)
+            + sm_config(1, div_int=div, wrap_bottom=AWG0, wrap_top=31,
+                        shiftctrl=AUTOPULL,        # 2 symbols/byte, MSB first
+                        pin_out=0x44,              # base 4, count 4
+                        pin_set=0x44))
+
+
 def setup(host, div=16):
     host.load_program(0, CAP_PROG)
     host.load_program(AWG0, AWG_PROG)
-    for sm in (0, 1):
-        host.set_clkdiv(sm, div)
-    host.set_wrap(0, 0, 31)
-    host.set_wrap(1, AWG0, 31)
-    host.write(SM(0) + SHIFTCTRL, AUTOPUSH)  # 2 samples/byte, MSB first
-    host.write(SM(0) + PIN_IN, 4)
-    host.write(SM(1) + SHIFTCTRL, AUTOPULL)
-    host.write(SM(1) + PIN_OUT, 0x44)        # base 4, count 4
-    host.write(SM(1) + PIN_SET, 0x44)
+    for addr, value in config(div):
+        host.write(addr, value)
 
 
 def replay(host, nibbles, div=16):

@@ -216,57 +216,13 @@ class WS2812Decoder:
 # SE0 = both low. With D+ on GPIO0 and D- on GPIO1, OUT PINS,2 takes the
 # symbol as {D-, D+}: J = 0b10, K = 0b01, SE0 = 0b00.
 
-USB_J, USB_K, USB_SE0 = 0b10, 0b01, 0b00
-
-
-def usb_crc16(data):
-    """CRC16-USB (poly 0x8005 reflected, init 0xFFFF), complemented."""
-    crc = 0xFFFF
-    for b in data:
-        for i in range(8):
-            if (crc ^ (b >> i)) & 1:
-                crc = (crc >> 1) ^ 0xA001
-            else:
-                crc >>= 1
-    return (~crc) & 0xFFFF
-
-
-def usb_ls_packet_symbols(pid, payload):
-    """Build one LS packet as a J/K/SE0 symbol list: sync + PID (+ data +
-    CRC16) with NRZI encoding ('0' toggles, '1' holds) and bit stuffing
-    (a 0 forced after six 1s), then the SE0/SE0/J EOP."""
-    packet = [pid] + list(payload)
-    if payload:
-        crc = usb_crc16(payload)
-        packet += [crc & 0xFF, (crc >> 8) & 0xFF]
-    bits = [0, 0, 0, 0, 0, 0, 0, 1]  # sync byte 0x80, LSB first
-    for b in packet:
-        bits += [(b >> i) & 1 for i in range(8)]
-    stuffed, ones = [], 0
-    for bit in bits:
-        stuffed.append(bit)
-        ones = ones + 1 if bit else 0
-        if ones == 6:
-            stuffed.append(0)
-            ones = 0
-    symbols, state = [], USB_J  # bus idles at J
-    for bit in stuffed:
-        if not bit:
-            state = USB_K if state == USB_J else USB_J
-        symbols.append(state)
-    return symbols + [USB_SE0, USB_SE0, USB_J]
-
-
-def usb_symbols_to_bytes(symbols, lead_idle=8):
-    """Pack symbols 4 per FIFO byte for OUT PINS,2 shifting right, with a
-    leading idle-J run and the final byte padded with idle J."""
-    syms = [USB_J] * lead_idle + list(symbols)
-    while len(syms) % 4:
-        syms.append(USB_J)
-    return [
-        syms[i] | (syms[i + 1] << 2) | (syms[i + 2] << 4) | (syms[i + 3] << 6)
-        for i in range(0, len(syms), 4)
-    ]
+# The host side of the USB packet: built by the example that ships.
+from usb_ls_tx import (  # noqa: E402
+    J as USB_J, K as USB_K, SE0 as USB_SE0,
+    crc16 as usb_crc16,
+    packet_symbols as usb_ls_packet_symbols,
+    symbols_to_bytes as usb_symbols_to_bytes,
+)
 
 
 class UsbLsDecoder:
@@ -388,13 +344,8 @@ class Ps2Host:
             prev_clk = clkl
 
 
-def ps2_frame_bytes(value):
-    """Pack one PS/2 device frame (start, 8 data LSB first, odd parity,
-    stop) into two FIFO bytes for OUT PINS,1 shifting right."""
-    parity = 1 ^ (bin(value).count("1") & 1)
-    bits = [0] + [(value >> i) & 1 for i in range(8)] + [parity, 1]
-    bits += [1] * 5  # pad the second byte with idle-high bits
-    return [sum(bits[k + i] << i for i in range(8)) for k in (0, 8)]
+# The host side of a PS/2 frame: packed by the example that ships.
+from ps2_device import frame_bytes as ps2_frame_bytes  # noqa: E402
 
 
 async def nec_transmit(dut, data_bytes, unit_ns, gpio_bit=3):

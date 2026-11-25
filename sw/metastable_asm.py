@@ -103,3 +103,31 @@ SIDE_OPT, SIDE_PINDIR = 0x40, 0x80
 
 # CTRL bits: [1:0] SM enable, [5:4] SM restart (restart also flushes FIFOs)
 CTRL_EN0, CTRL_EN1, CTRL_RST0, CTRL_RST1 = 0x01, 0x02, 0x10, 0x20
+
+
+def sm_config(sm, div_int=1, div_frac=0, wrap_bottom=0, wrap_top=31,
+              shiftctrl=OUT_RIGHT | IN_RIGHT, thresh=0, pin_out=0, pin_set=0,
+              pin_in=0, pin_side=0, jmp_pin=0, status_cfg=1):
+    """Every configuration register of one state machine, as a list of
+    (address, value) pairs. The defaults are the reset values.
+
+    A program that is set up through this list does not depend on what
+    ran before it: a register that it leaves out is written back to its
+    reset value.
+    """
+    base = SM(sm)
+    return [
+        (base + CLKDIV_INT_L, div_int & 0xFF),
+        (base + CLKDIV_INT_H, (div_int >> 8) & 0xFF),
+        (base + CLKDIV_FRAC, div_frac & 0xFF),
+        (base + WRAP_TOP, wrap_top),
+        (base + WRAP_BOTTOM, wrap_bottom),
+        (base + SHIFTCTRL, shiftctrl),
+        (base + THRESH, thresh),
+        (base + PIN_OUT, pin_out),
+        (base + PIN_SET, pin_set),
+        (base + PIN_IN, pin_in),
+        (base + PIN_SIDE, pin_side),
+        (base + JMP_PIN, jmp_pin),
+        (base + STATUS_CFG, status_cfg),
+    ]
