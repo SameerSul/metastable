@@ -12,8 +12,8 @@ Full datasheet: [docs/info.md](docs/info.md)
 
 | | |
 |---|---|
-| Protocols demonstrated | UART, SPI, I2C, Manchester, WS2812, USB LS (1.5 MHz, +299 ppm), PS/2, NEC IR — plus capture/replay and two protocols concurrently |
-| Verification | 19 cocotb tests (independent bus/decoder models), constrained-random cosim vs a golden model, SPI fuzz with mid-byte aborts, formal proofs on 3 blocks (BMC + k-induction) |
+| Protocols demonstrated | UART, SPI (modes 0 to 3), I2C (write and read, 100 kHz and 400 kHz), Manchester, WS2812, USB LS (1.5 MHz, +299 ppm), PS/2, NEC IR — plus capture/replay and two protocols concurrently |
+| Verification | 27 cocotb tests (independent bus/decoder models), constrained-random cosim vs a golden model, SPI fuzz with mid-byte aborts, formal proofs on 3 blocks (BMC + k-induction) |
 | Timing theorem | proved: 256 divider ticks span exactly `256*div_int + div_frac` cycles — zero cumulative drift |
 | Implementation | 6x4 tiles, 22% util, +1.45 ns setup @ slow corner after a placement audit recovered 4.3x margin, ~4.7 mW |
 | Host software | MicroPython assembler + driver + examples for the TT demo board |
@@ -76,6 +76,15 @@ The cocotb suite ([test/test.py](test/test.py)) covers:
   SM1 answers full duplex with autopull/autopush
 - **I2C master** — open-drain address + data write (side-set on pin
   directions) against a Python slave model that ACKs each byte
+- **SPI modes 0 to 3** — a master and a slave program for each mode
+  ([sw/examples/spi_modes.py](sw/examples/spi_modes.py)); a monitor that
+  knows only the mode checks the idle level of SCK, the sampling edge,
+  and that both data lines hold still around it
+- **I2C master read** — START, address, every byte acknowledged except
+  the last, STOP ([sw/examples/i2c_read.py](sw/examples/i2c_read.py)),
+  at 100 kHz and at 400 kHz from one program; it waits for a target that
+  stretches the clock, stops at once when no device answers, and a bus
+  model measures every time against the I2C specification's minimums
 - **Manchester loopback** — SM0 transmits IEEE 802.3 Manchester with a
   mid-bit transition every 8 ticks, SM1 locks onto the preamble and decodes
 - **WS2812 / NeoPixel** — SM0 drives 800 kHz pulse-width-coded LED data

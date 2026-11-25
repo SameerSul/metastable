@@ -12,6 +12,8 @@ import sys
 from cocotb.triggers import ClockCycles, RisingEdge
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "sw"))
+# The example programs: the tests run the files that ship to the board.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "sw", "examples"))
 from metastable_asm import *  # noqa: F401,F403
 
 
@@ -419,3 +421,291 @@ async def nec_transmit(dut, data_bytes, unit_ns, gpio_bit=3):
         for i in range(8):  # LSB first
             await pulse(1, 3 if (b >> i) & 1 else 1)
     await pulse(1, 4)  # stop burst, then idle
+
+
+# ---------------------------------------------------------------------------
+# SPI monitor: decodes SCK, MOSI and MISO by the rules of one SPI mode
+# ---------------------------------------------------------------------------
+
+class SpiMonitor:
+    """Watch SCK = GPIO0, MOSI = GPIO1 and MISO = GPIO2 at the pads.
+
+    The monitor knows the mode and nothing about the programs. It checks
+    that SCK rests at the mode's idle level, takes MOSI and MISO on the
+    mode's sampling edge, and checks that neither line changes within
+    GUARD clock cycles of a sampling edge. A byte is eight sampling edges,
+    most significant bit first.
+    """
+
+    GUARD = 4  # clock cycles a data line must hold still around a sample
+
+    def __init__(self, dut, mode, sck=0, mosi=1, miso=2):
+        self.dut = dut
+        self.cpol, self.cpha = (mode >> 1) & 1, mode & 1
+        self.pins = (sck, mosi, miso)
+        self.mosi_bytes, self.miso_bytes = [], []
+        self.errors = []
+        self.leading = self.trailing = 0
+        self._armed = False
+        self._level = (0, 0, 0)
+        self._t = 0
+        self._changed = [0, 0]      # cycle of the last change: MOSI, MISO
+        self._sampled = None        # cycle of the last sampling edge
+        self._bits = 0
+        self._sh = [0, 0]
+
+    def arm(self):
+        """Start decoding. SCK has to be at rest, at the idle level."""
+        if self._level[0] != self.cpol:
+            self.errors.append("SCK rests at %d, and the mode's idle level is %d"
+                               % (self._level[0], self.cpol))
+        self._armed = True
+
+    def finish(self):
+        """Stop decoding and return the list of errors found."""
+        self._armed = False
+        if self._level[0] != self.cpol:
+            self.errors.append("SCK ends at %d, and the mode's idle level is %d"
+                               % (self._level[0], self.cpol))
+        if self._bits:
+            self.errors.append("%d bits are left over after the last byte" % self._bits)
+        if self.leading != self.trailing:
+            self.errors.append("%d leading edges and %d trailing edges"
+                               % (self.leading, self.trailing))
+        return self.errors
+
+    async def run(self):
+        dut = self.dut
+        while True:
+            await RisingEdge(dut.clk)
+            self._t += 1
+            try:
+                pads = int(dut.uio_out.value) & int(dut.uio_oe.value)
+            except ValueError:
+                continue
+            level = tuple((pads >> p) & 1 for p in self.pins)
+            prev, self._level = self._level, level
+            if not self._armed:
+                continue
+            for i, name in ((0, "MOSI"), (1, "MISO")):
+                if level[i + 1] != prev[i + 1]:
+                    self._changed[i] = self._t
+                    if self._sampled is not None and self._t - self._sampled < self.GUARD:
+                        self.errors.append("%s changed %d cycles after a sampling edge"
+                                           % (name, self._t - self._sampled))
+            if level[0] == prev[0]:
+                continue
+            is_leading = level[0] != self.cpol
+            if is_leading:
+                self.leading += 1
+            else:
+                self.trailing += 1
+            if is_leading != (self.cpha == 0):
+                continue
+            # The sampling edge: take both data lines as they stand.
+            self._sampled = self._t
+            for i, name in ((0, "MOSI"), (1, "MISO")):
+                if self._t - self._changed[i] < self.GUARD:
+                    self.errors.append("%s changed %d cycles before a sampling edge"
+                                       % (name, self._t - self._changed[i]))
+                self._sh[i] = ((self._sh[i] << 1) | level[i + 1]) & 0xFF
+            self._bits += 1
+            if self._bits == 8:
+                self.mosi_bytes.append(self._sh[0])
+                self.miso_bytes.append(self._sh[1])
+                self._bits, self._sh = 0, [0, 0]
+
+
+# ---------------------------------------------------------------------------
+# I2C bus with one target device, for reads and writes, with a timing record
+# ---------------------------------------------------------------------------
+
+# Minimum times of the I2C-bus specification (NXP UM10204), in ns.
+I2C_SPEC_NS = {
+    "standard": {"period": 10000, "t_hd_sta": 4000, "t_low": 4700, "t_high": 4000,
+                 "t_su_dat": 250, "t_su_sto": 4000, "t_buf": 4700},
+    "fast": {"period": 2500, "t_hd_sta": 600, "t_low": 1300, "t_high": 600,
+             "t_su_dat": 100, "t_su_sto": 600, "t_buf": 1300},
+}
+
+
+class I2CTarget:
+    """Open-drain I2C bus model with one target. SDA = GPIO0, SCL = GPIO1.
+
+    The bus is a wired AND of the DUT's pads and the target's own drivers,
+    and a released line reads high. The target acknowledges its address,
+    takes written bytes, and serves `read_data` when it is read: it shifts
+    a bit out after each falling edge of SCL and stops at the master's
+    NACK. With `stretch` it holds SCL low for that many clock cycles before
+    each byte it sends. Every edge of the resolved lines is recorded with
+    its time, and so is every change of the DUT's own drive on SDA.
+    `timing()` measures the bus from that record.
+    """
+
+    def __init__(self, dut, addr7=0x52, read_data=(), stretch=0):
+        self.dut = dut
+        self.addr7 = addr7
+        self.read_data = list(read_data)
+        self.stretch = stretch
+        self.addressed = []     # (address, read bit) of every address byte
+        self.written = []       # bytes the master wrote
+        self.sent = []          # bytes the master clocked out of the target
+        self.master_acks = []   # True for each sent byte the master acknowledged
+        self.starts, self.stops = [], []
+        self.scl_edges, self.sda_edges = [], []   # (time in ns, new level)
+        self.dut_sda_changes = []                 # times the DUT's SDA drive changed
+        self.stretch_rises = []                   # rises of SCL that ended a stretch
+        self._sda_low = self._scl_low = False
+        self._hold = 0
+        self._phase = "idle"
+        self._bit = self._sh = self._cur = 0
+        self._matched = self._ack = False
+
+    def _next_byte(self):
+        self._cur = self.read_data.pop(0) if self.read_data else 0xFF
+        self._bit = 0
+        self._sda_low = not (self._cur >> 7) & 1
+        if self.stretch:
+            self._scl_low, self._hold = True, self.stretch
+
+    def _on_fall(self):
+        if self._phase == "addr":
+            if self._bit == 8:
+                self.addressed.append((self._sh >> 1, self._sh & 1))
+                self._matched = (self._sh >> 1) == self.addr7
+                self._sda_low = self._matched
+            elif self._bit == 9:
+                self._sda_low = False
+                if not self._matched:
+                    self._phase = "idle"
+                elif self._sh & 1:
+                    self._phase = "read"
+                    self._next_byte()
+                else:
+                    self._phase, self._bit, self._sh = "write", 0, 0
+        elif self._phase == "write":
+            if self._bit == 8:
+                self.written.append(self._sh)
+                self._sda_low = True
+            elif self._bit == 9:
+                self._sda_low = False
+                self._bit, self._sh = 0, 0
+        elif self._phase == "read":
+            if self._bit == 9:
+                self.sent.append(self._cur)
+                self.master_acks.append(self._ack)
+                if self._ack:
+                    self._next_byte()
+                else:
+                    self._phase, self._sda_low = "idle", False
+            elif self._bit == 8:
+                self._sda_low = False           # the master's acknowledge slot
+            else:
+                self._sda_low = not (self._cur >> (7 - self._bit)) & 1
+
+    def _on_rise(self, sda):
+        if self._phase in ("addr", "write"):
+            if self._bit < 8:
+                self._sh = ((self._sh << 1) | sda) & 0xFF
+            self._bit += 1
+        elif self._phase == "read":
+            if self._bit == 8:
+                self._ack = sda == 0
+            self._bit += 1
+
+    async def run(self):
+        import cocotb.utils
+        dut = self.dut
+        prev_sda, prev_scl, prev_drive = 1, 1, 0
+        while True:
+            await RisingEdge(dut.clk)
+            try:
+                out = int(dut.uio_out.value)
+                oe = int(dut.uio_oe.value)
+            except ValueError:
+                out, oe = 0, 0
+            released = False
+            if self._hold:
+                self._hold -= 1
+                if not self._hold:
+                    self._scl_low, released = False, True
+            sda = 0 if ((oe & ~out & 1) or self._sda_low) else 1
+            scl = 0 if ((oe & ~out & 2) or self._scl_low) else 1
+            now = cocotb.utils.get_sim_time("ns")
+            if released and scl:                # the target, not the DUT, let SCL rise
+                self.stretch_rises.append(now)
+            drive = oe & ~out & 1
+            if drive != prev_drive:
+                self.dut_sda_changes.append(now)
+            prev_drive = drive
+            if sda != prev_sda:
+                self.sda_edges.append((now, sda))
+            if scl != prev_scl:
+                self.scl_edges.append((now, scl))
+            if scl and prev_scl and sda != prev_sda:
+                if not sda:                     # START
+                    self.starts.append(now)
+                    self._phase, self._bit, self._sh = "addr", 0, 0
+                    self._sda_low = False
+                else:                           # STOP
+                    self.stops.append(now)
+                    self._phase, self._sda_low = "idle", False
+            elif self._phase != "idle":
+                if scl and not prev_scl:
+                    self._on_rise(sda)
+                elif prev_scl and not scl:
+                    self._on_fall()
+            dut.uio_in.value = (out & oe & 0xFC) | (scl << 1) | sda
+            prev_sda, prev_scl = sda, scl
+
+    def timing(self):
+        """The smallest value of each bus time in the record, in ns. A time
+        that the record does not contain is absent from the result. The
+        data hold time, t_hd_dat, is the DUT's own: from a falling edge of
+        SCL to the next change of the DUT's drive on SDA. A clock period
+        that begins with the end of a stretch is counted apart, as
+        period_after_stretch."""
+        marks = sorted(self.starts + self.stops)
+
+        def clear(a, b):                        # no START or STOP inside (a, b)
+            return not any(a < m < b for m in marks)
+
+        rises = [t for t, level in self.scl_edges if level]
+        falls = [t for t, level in self.scl_edges if not level]
+        got = {}
+
+        def keep(name, value):
+            if name not in got or value < got[name]:
+                got[name] = value
+
+        for t in self.starts:
+            after = [f for f in falls if f > t]
+            if after:
+                keep("t_hd_sta", after[0] - t)
+        for f in falls:
+            after = [r for r in rises if r > f]
+            if after:
+                keep("t_low", after[0] - f)
+        for r in rises:
+            after = [f for f in falls if f > r]
+            if after and clear(r, after[0]):
+                keep("t_high", after[0] - r)
+        for a, b in zip(rises, rises[1:]):
+            if clear(a, b):
+                keep("period_after_stretch" if a in self.stretch_rises else "period", b - a)
+        for t, _ in self.sda_edges:
+            after = [r for r in rises if r > t]
+            if t not in marks and after:
+                keep("t_su_dat", after[0] - t)
+        for t in self.dut_sda_changes:
+            before = [f for f in falls if f <= t]
+            if t not in marks and before and clear(before[-1], t):
+                keep("t_hd_dat", t - before[-1])
+        for t in self.stops:
+            before = [r for r in rises if r < t]
+            if before:
+                keep("t_su_sto", t - before[-1])
+            after = [s for s in self.starts if s > t]
+            if after:
+                keep("t_buf", after[0] - t)
+        return got

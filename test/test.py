@@ -10,6 +10,7 @@ from metastable import (
     SPI_HALF, SpiHost, uio_loopback, I2CSlave, WS2812Decoder, UsbLsDecoder,
     usb_ls_packet_symbols, usb_symbols_to_bytes, usb_crc16,
     Ps2Host, ps2_frame_bytes, nec_transmit, side,
+    SpiMonitor, I2CTarget, I2C_SPEC_NS,
     JMP, WAIT, IN_, OUT, PUSH, PULL, MOV, IRQ, SET,
     SRC_PINS, SRC_X, SRC_Y, SRC_NULL, SRC_STATUS, SRC_OSR,
     ODST_PINS, ODST_X, ODST_NULL, ODST_PINDIRS, ODST_PC, ODST_ISR,
@@ -24,6 +25,8 @@ from metastable import (
     TXF, RXF, STATUS_CFG, STATUS_RX,
 )
 from golden import random_case, random_case_pins
+import spi_modes
+import i2c_read
 
 
 async def setup(dut):
@@ -1191,3 +1194,228 @@ async def test_out_only_pads(dut):
     pads = (int(dut.uo_out.value) >> 2) & 0x7
     assert pads == 0x2, f"pads did not hold after disable: {pads:#03b}"
     dut._log.info("out-only pads uo[4:2] drive and hold verified")
+
+
+# ---------------------------------------------------------------------------
+# SPI modes 0 to 3: the programs of sw/examples/spi_modes.py
+# ---------------------------------------------------------------------------
+
+async def spi_mode_case(dut, mode):
+    """SM0 is the master and SM1 the slave of one SPI mode, full duplex.
+
+    A monitor that knows only the mode decodes the three wires. It checks
+    the idle level of SCK, which edge samples, and that MOSI and MISO hold
+    still around every sampling edge.
+    """
+    spi = await setup(dut)
+    cocotb.start_soon(uio_loopback(dut))
+    mon = SpiMonitor(dut, mode)
+    cocotb.start_soon(mon.run())
+
+    await spi.load_program(spi_modes.MASTER_ORIGIN, spi_modes.master_program(mode))
+    await spi.load_program(spi_modes.SLAVE_ORIGIN, spi_modes.slave_program(mode))
+    for addr, value in spi_modes.master_config() + spi_modes.slave_config(mode):
+        await spi.write(addr, value)
+
+    await spi.write(R_CTRL, 0x33)       # both enabled and restarted
+    await ClockCycles(dut.clk, 60)      # the master waits at its PULL
+    mon.arm()                           # SCK has to rest at the idle level
+
+    mosi_bytes = [0x9E, 0x01, 0x55, 0xC3]
+    miso_bytes = [0xEF, 0x40, 0xAA, 0x81]
+    for b in miso_bytes:
+        await spi.write(SM(1) + TXF, b)
+    for b in mosi_bytes:
+        await spi.write(SM(0) + TXF, b)
+
+    m_rx, s_rx = [], []
+    for _ in range(300):
+        fstat = (await spi.read(R_FSTAT, 1))[0]
+        if not fstat & 0x04:  # SM0 RX non-empty
+            m_rx += await spi.read(SM(0) + RXF, 1)
+        if not fstat & 0x40:  # SM1 RX non-empty
+            s_rx += await spi.read(SM(1) + RXF, 1)
+        if len(m_rx) == 4 and len(s_rx) == 4:
+            break
+        await ClockCycles(dut.clk, 20)
+    await ClockCycles(dut.clk, 60)
+
+    errors = mon.finish()
+    assert not errors, f"mode {mode}: {errors}"
+    assert mon.leading == 32, f"mode {mode}: {mon.leading} clock pulses, not 32"
+    assert mon.mosi_bytes == mosi_bytes, f"mode {mode}: MOSI on the wire {mon.mosi_bytes}"
+    assert mon.miso_bytes == miso_bytes, f"mode {mode}: MISO on the wire {mon.miso_bytes}"
+    assert s_rx == mosi_bytes, f"mode {mode}: slave RX {s_rx} != {mosi_bytes}"
+    assert m_rx == miso_bytes, f"mode {mode}: master RX {m_rx} != {miso_bytes}"
+
+
+@cocotb.test()
+async def test_spi_mode0(dut):
+    """SPI mode 0: SCK idles low, data sampled on the rising edge."""
+    await spi_mode_case(dut, 0)
+
+
+@cocotb.test()
+async def test_spi_mode1(dut):
+    """SPI mode 1: SCK idles low, data sampled on the falling edge."""
+    await spi_mode_case(dut, 1)
+
+
+@cocotb.test()
+async def test_spi_mode2(dut):
+    """SPI mode 2: SCK idles high, data sampled on the falling edge."""
+    await spi_mode_case(dut, 2)
+
+
+@cocotb.test()
+async def test_spi_mode3(dut):
+    """SPI mode 3: SCK idles high, data sampled on the rising edge."""
+    await spi_mode_case(dut, 3)
+
+
+# ---------------------------------------------------------------------------
+# I2C master read: the program of sw/examples/i2c_read.py
+# ---------------------------------------------------------------------------
+
+async def i2c_read_start(dut, speed, **target):
+    """Load the read program at one speed, beside a bus with one target."""
+    spi = await setup(dut)
+    bus = I2CTarget(dut, **target)
+    cocotb.start_soon(bus.run())
+    await spi.load_program(0, i2c_read.PROG)
+    for addr, value in i2c_read.config(speed):
+        await spi.write(addr, value)
+    await spi.write(R_CTRL, 0x11)       # SM0 enabled and restarted
+    return spi, bus
+
+
+async def i2c_read_txn(spi, dut, addr7, n, polls=600):
+    """The steps of i2c_read.read_txn, on the test bench's SPI host."""
+    done = 1 << i2c_read.DONE_IRQ
+    await spi.load_program(i2c_read.SET_Y_ADDR, [i2c_read.count_patch(n)])
+    await spi.write(R_IRQ, done)
+    await spi.write(SM(0) + TXF, i2c_read.address_byte(addr7))
+    for _ in range(polls):
+        if (await spi.read(R_IRQ, 1))[0] & done:
+            break
+        await ClockCycles(dut.clk, 50)
+    else:
+        raise AssertionError("the transaction did not raise its flag")
+    await spi.write(R_IRQ, done)
+    await ClockCycles(dut.clk, 1200)    # the STOP follows the flag
+    level = (await spi.read(R_FLEVEL0, 1))[0] >> 4
+    data = []
+    for _ in range(level):
+        data += await spi.read(SM(0) + RXF, 1)
+    return data or None
+
+
+def i2c_check_timing(bus, speed, needs):
+    """Every bus time in the record meets the specification for `speed`."""
+    got, spec = bus.timing(), I2C_SPEC_NS[speed]
+    missing = [k for k in needs if k not in got]
+    assert not missing, f"the record has no {missing}"
+    short = {k: (got[k], spec[k]) for k in spec if k in got and got[k] < spec[k]}
+    assert not short, f"{speed} mode: measured below the minimum, in ns: {short}"
+    assert got["t_hd_dat"] > 0, "SDA changed on the falling edge of SCL"
+    return got
+
+
+@cocotb.test()
+async def test_i2c_read_fast(dut):
+    """Read three bytes at fast-mode speed, 400 kHz.
+
+    The master acknowledges every byte but the last. The bus times are
+    measured on the wires and held against the fast-mode minimums.
+    """
+    data = [0xA5, 0x3C, 0xF0]
+    spi, bus = await i2c_read_start(dut, i2c_read.FAST, addr7=0x52, read_data=data)
+    got = await i2c_read_txn(spi, dut, 0x52, 3)
+
+    assert got == data, f"read {got}, and the target holds {data}"
+    assert bus.addressed == [(0x52, 1)], f"address byte {bus.addressed}"
+    assert bus.sent == data and bus.master_acks == [True, True, False], \
+        f"sent {bus.sent}, acknowledged {bus.master_acks}"
+    assert len(bus.starts) == 1 and len(bus.stops) == 1, \
+        f"{len(bus.starts)} START and {len(bus.stops)} STOP conditions"
+    rises = sum(1 for _, level in bus.scl_edges if level)
+    assert rises == 36 + 1, f"{rises} rises of SCL, not 36 clocks and the STOP"
+    t = i2c_check_timing(bus, "fast", ["period", "t_hd_sta", "t_low", "t_high",
+                                       "t_su_dat", "t_su_sto"])
+    dut._log.info("fast mode, ns: %s", t)
+    assert (await spi.read(R_PC0, 1))[0] == 1, "the master is not back at its PULL"
+
+
+@cocotb.test()
+async def test_i2c_read_standard_stretch(dut):
+    """Read at standard-mode speed, 100 kHz, from a target that stretches
+    the clock.
+
+    The target holds SCL low for about 12 us before each byte, more than
+    twice the master's own low time. Three reads use three hold lengths, a
+    third of a tick apart, so the release falls at different points of the
+    master's tick. The master waits for the line each time, and the low
+    and high times still meet the standard-mode minimums.
+
+    The master sees its pins once a tick. So the clock period that begins
+    with the end of a stretch can be up to one tick shorter than the rest:
+    the test records it, and holds it to the sum of the two minimums.
+    """
+    data = [0x81, 0x7E, 0x3C, 0xD2]
+    holds = (600, 611, 622)                         # clock cycles: 12 us and up
+    spi, bus = await i2c_read_start(dut, i2c_read.STANDARD, addr7=0x52,
+                                    read_data=data, stretch=holds[0])
+    got = await i2c_read_txn(spi, dut, 0x52, 2)
+    for hold in holds[1:]:
+        bus.stretch = hold
+        got += await i2c_read_txn(spi, dut, 0x52, 1)
+
+    assert got == data, f"read {got}, and the target holds {data}"
+    assert bus.master_acks == [True, False, False, False], f"acknowledged {bus.master_acks}"
+    assert len(bus.starts) == 3 and len(bus.stops) == 3
+    t = i2c_check_timing(bus, "standard", ["period", "t_hd_sta", "t_low", "t_high",
+                                           "t_su_dat", "t_su_sto", "t_buf"])
+    dut._log.info("standard mode, ns: %s", t)
+    falls = [x for x, level in bus.scl_edges if not level]
+    rises = [x for x, level in bus.scl_edges if level]
+    lows = [min(r for r in rises if r > f) - f for f in falls if any(r > f for r in rises)]
+    stretched = [low for low in lows if low >= holds[0] * 20]
+    assert len(stretched) == 4, f"{len(stretched)} stretched low times, not 4: {sorted(lows)[-5:]}"
+    # The high time that follows a stretch is the one the master has to
+    # count from the line, not from its own release.
+    after = []
+    for f in falls:
+        up = [r for r in rises if r > f]
+        if up and up[0] - f >= holds[0] * 20:
+            down = [x for x in falls if x > up[0]]
+            after.append(down[0] - up[0])
+    dut._log.info("high times after a stretch, ns: %s", after)
+    spec = I2C_SPEC_NS["standard"]
+    assert min(after) >= spec["t_high"], f"high times after a stretch {after}"
+    assert t["period_after_stretch"] >= spec["t_low"] + spec["t_high"], \
+        f"a period of {t['period_after_stretch']} ns after a stretch"
+
+
+@cocotb.test()
+async def test_i2c_read_no_device(dut):
+    """An address that nobody acknowledges gets a STOP and no data clock.
+
+    The next read, of the device that is there, then works, and the bus
+    free time between the two meets the fast-mode minimum.
+    """
+    spi, bus = await i2c_read_start(dut, i2c_read.FAST, addr7=0x52, read_data=[0x6B])
+    got = await i2c_read_txn(spi, dut, 0x29, 2)
+
+    assert got is None, f"read {got} from an address with no device"
+    assert bus.addressed == [(0x29, 1)], f"address byte {bus.addressed}"
+    rises = sum(1 for _, level in bus.scl_edges if level)
+    assert rises == 9 + 1, f"{rises} rises of SCL, not 9 clocks and the STOP"
+    assert len(bus.starts) == 1 and len(bus.stops) == 1
+
+    got = await i2c_read_txn(spi, dut, 0x52, 1)
+    assert got == [0x6B], f"read {got} after the failed address"
+    assert bus.addressed == [(0x29, 1), (0x52, 1)]
+    assert bus.master_acks == [False]
+    assert len(bus.starts) == 2 and len(bus.stops) == 2
+    t = i2c_check_timing(bus, "fast", ["t_buf", "t_su_sto", "t_hd_sta"])
+    dut._log.info("fast mode, ns: %s", t)
