@@ -139,6 +139,24 @@ discipline (single-cycle, exclusive, exactly-once) proved with no
 assumptions at all on the pad waveforms — arbitrary SCK glitches and
 mid-byte aborts included.
 
+The layout's netlist is proved against the RTL as well
+([formal/netlist_equiv.py](formal/netlist_equiv.py)). The script pairs
+each of the netlist's 1,294 flip-flops with a register bit of the RTL:
+1,272 by the name of the net, and the 22 copies that synthesis makes of
+memory read addresses by a proof that each one loads the same value as a
+named flip-flop. Then it proves, for every state and every input, that
+all 24 output pins agree and that every pair agrees again after the next
+clock edge. On the netlist of the 8x4 layout (workflow run 44693403556)
+every proof holds: 1,300 signal pairs in about 7 minutes on a laptop. A
+control run changes one gate of the netlist, and its proof fails as it
+has to. The script's header states what the proof assumes and what it
+leaves out.
+
+```sh
+formal/netlist_equiv.py --netlist runs/wokwi/final/nl/tt_um_sulems6_metastable.nl.v \
+    --liberty $PDK_ROOT/ihp-sg13cmos5l/libs.ref/sg13cmos5l_stdcell/lib/sg13cmos5l_stdcell_typ_1p20V_25C.lib
+```
+
 ## Physical design
 
 [analysis/](analysis/README.md) audits the hardened layout with the proxy
